@@ -26,7 +26,10 @@ jobs:
         run: |
           $ErrorActionPreference='Stop'
           Push-Location cpp/app
-          C:\msys64\ucrt64\bin\windres.exe app.rc -O coff -o app-res.o
+          $windres = 'C:\msys64\ucrt64\bin\windres.exe'
+          if(-not (Test-Path $windres)){ $windres = 'C:\msys64\ucrt64\bin\x86_64-w64-mingw32-windres.exe' }
+          & $windres app.rc -O coff -o app-res.o
+          if($LASTEXITCODE){ throw 'icon resource compilation failed' }
           C:\msys64\ucrt64\bin\g++.exe -std=c++20 -O2 -mwindows -DUNICODE -D_UNICODE `
             -o sysmon.exe app.cpp app-res.o `
             -ld2d1 -ldwrite -ldwmapi -lcomctl32 -lole32 -loleaut32 -luuid `

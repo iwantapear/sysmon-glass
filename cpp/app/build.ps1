@@ -3,6 +3,7 @@ $ErrorActionPreference='Stop'
 $root=$PSScriptRoot
 $gpp='C:\msys64\ucrt64\bin\g++.exe'
 $windres='C:\msys64\ucrt64\bin\windres.exe'
+if(-not (Test-Path $windres)){ $windres='C:\msys64\ucrt64\bin\x86_64-w64-mingw32-windres.exe' }
 if(-not (Test-Path $gpp)){ throw 'MSYS2 g++ not found. Install MSYS2 in C:\msys64 or edit build.ps1.' }
 if(Test-Path $windres){
     & $windres (Join-Path $root 'app.rc') -O coff -o (Join-Path $root 'app-res.o')
