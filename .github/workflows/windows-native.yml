@@ -28,7 +28,12 @@ jobs:
           Push-Location cpp/app
           # Compile without the optional icon resource on CI: resource tool names
           # differ between MSYS2 distributions; app falls back to a stock icon.
-          C:\msys64\ucrt64\bin\g++.exe -std=c++20 -O2 -mwindows -DUNICODE -D_UNICODE `
+          # setup-msys2 uses D:\msys64 on GitHub-hosted runners; local builds
+          # commonly use C:\msys64. Resolve the root instead of hardcoding it.
+          $msysRoot = if(Test-Path 'C:\msys64\ucrt64\bin\g++.exe'){ 'C:\msys64' } else { 'D:\msys64' }
+          $gpp = Join-Path $msysRoot 'ucrt64\bin\g++.exe'
+          if(-not (Test-Path $gpp)){ throw "g++ not found under $msysRoot" }
+          & $gpp -std=c++20 -O2 -mwindows -DUNICODE -D_UNICODE `
             -o sysmon.exe app.cpp `
             -ld2d1 -ldwrite -ldwmapi -lcomctl32 -lole32 -loleaut32 -luuid `
             -luiautomationcore -liphlpapi -lshell32 -lgdi32 -luser32
