@@ -19,7 +19,7 @@ jobs:
         with:
           msystem: UCRT64
           update: true
-          install: mingw-w64-ucrt-x86_64-gcc
+          install: binutils mingw-w64-ucrt-x86_64-gcc
 
       - name: Compile native executable
         shell: pwsh
