@@ -1,0 +1,3 @@
+param([string]$Root=(Join-Path $PSScriptRoot 'test-output'))
+$ErrorActionPreference='Stop'; New-Item -ItemType Directory -Path $Root -Force|Out-Null
+$exe=Join-Path $PSScriptRoot 'artifacts\payload\SysMon.Glass.exe'; $p=[Diagnostics.Process]::Start($exe, ('--self-test "' + (Join-Path $Root 'smoke.json') + '"')); $p.WaitForExit(); if($p.ExitCode){throw "Launcher smoke failed: $($p.ExitCode)"}; $r=Get-Content (Join-Path $Root 'smoke.json') -Raw|ConvertFrom-Json; if(!$r.EntryExists){throw 'WPF entry missing'}; Write-Host "Launcher smoke PASS: $($r.PowerShell)"

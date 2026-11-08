@@ -1,0 +1,78 @@
+Key|zh-CN|zh-TW|en
+appTitle|系统状态|系統狀態|System Monitor
+monitor|实时监控|即時監控|LIVE MONITOR
+localMachine|本机|本機|Local
+remoteCompute|远程计算|遠端運算|REMOTE COMPUTE
+footer|双击托盘图标显示或隐藏 · 右键打开设置|按兩下系統匣圖示顯示或隱藏 · 按右鍵開啟設定|Double-click the tray icon to show or hide · Right-click for settings
+hide|隐藏到托盘|隱藏至系統匣|Hide to tray
+resize|拖动调整大小|拖曳調整大小|Drag to resize
+done|完成调整|完成調整|Done
+saveGeometry|保存位置和大小|儲存位置和大小|Save position and size
+toggleWindow|显示 / 隐藏|顯示 / 隱藏|Show / Hide
+desktopMode|桌面底层（仅卡片）|桌面底層（僅卡片）|Desktop mode (cards only)
+exitDesktop|解除桌面底层|解除桌面底層|Exit desktop mode
+adjust|调整位置与大小|調整位置與大小|Adjust position and size
+scale|分辨率 / 缩放|解析度 / 縮放|Resolution / Scale
+manualScale|分辨率 / 缩放（手动）|解析度 / 縮放（手動）|Resolution / Scale (manual)
+autoScale|自动适配屏幕|自動配合螢幕|Fit to screen
+refresh|刷新频率|更新頻率|Refresh interval
+seconds|每 {0} 秒|每 {0} 秒|Every {0} s
+theme|外观主题|外觀主題|Theme
+language|界面语言|介面語言|Language
+exit|退出|結束|Exit
+light|明亮|明亮|Light
+dark|暗黑|深色|Dark
+ocean|深海蓝|深海藍|Deep Ocean
+forest|松林绿|松林綠|Pine Forest
+amber|暖琥珀|暖琥珀|Warm Amber
+sunset|日落熔橙|日落熔橙|Sunset Blaze
+rose|樱粉玻璃|櫻粉玻璃|Rose Glass
+violet|星云紫|星雲紫|Nebula Violet
+aurora|极光翠|極光翠|Aurora
+neon|霓虹夜|霓虹夜|Neon Night
+flame|烈焰红|烈焰紅|Crimson Flame
+switchTheme|切换主题|切換主題|Cycle theme
+switchLight|切换到明亮主题|切換至明亮主題|Switch to light theme
+switchDark|切换到暗黑主题|切換至深色主題|Switch to dark theme
+acrylic|亚克力|壓克力|Acrylic
+solidBackground|实色背景|純色背景|Solid background
+online|DGX 在线 · {0} 秒前|DGX 在線 · {0} 秒前|DGX online · {0} s ago
+offline|DGX 离线|DGX 離線|DGX offline
+noData|数据离线|資料離線|No live data
+cpuTemp|CPU 温度|CPU 溫度|CPU temperature
+gpuTemp|GPU 温度|GPU 溫度|GPU temperature
+cpuFan|CPU 风扇|CPU 風扇|CPU fan
+caseFan|机箱风扇|機殼風扇|Case fans
+pump|水泵|水泵|Pump
+vrmTemp|VRM 温度|VRM 溫度|VRM temperature
+fan|风扇|風扇|Fan
+nvme|NVMe 温度|NVMe 溫度|NVMe temperature
+memory|内存|記憶體|Memory
+load|负载|負載|Load
+networkDown|网络速率 · 下载|網路速率 · 下載|Network download
+diskUsed|磁盘空间 · 已用|磁碟空間 · 已用|Disk space used
+networkWait|等待网卡采样|等待網路介面取樣|Waiting for network samples
+upload|上传 {0} {1}|上傳 {0} {1}|Upload {0} {1}
+diskUnavailable|固定磁盘空间不可用|固定磁碟空間無法使用|Fixed-drive space unavailable
+power|功耗 {0} W|功耗 {0} W|Power {0} W
+powerUtil|功耗 {0} W · 使用率 {1}%|功耗 {0} W · 使用率 {1}%|Power {0} W · Usage {1}%
+duty|占空比 {0}%|工作週期 {0}%|Duty {0}%
+caseDuty|占空比 {0}% · 最高那路|工作週期 {0}% · 最高轉速|Duty {0}% · Fastest fan
+thermalZone|ACPI 最高温区|ACPI 最高溫區|Hottest ACPI zone
+localDrive|本地盘|本機磁碟|Local drive
+memoryTotal|共 {0} GB|共 {0} GB|{0} GB total
+uptime|已运行 {0} 小时|已執行 {0} 小時|Uptime {0} h
+trayStatus|本机 CPU {0}°C · GPU {1}°C · DGX GPU {2}°C|本機 CPU {0}°C · GPU {1}°C · DGX GPU {2}°C|Local CPU {0}°C · GPU {1}°C · DGX GPU {2}°C
+saveError|无法保存设置：{0}|無法儲存設定：{0}|Could not save settings: {0}
+desktopError|无法切换桌面模式：{0}|無法切換桌面模式：{0}|Could not switch desktop mode: {0}
+cpuPwrCard|CPU 功耗|CPU 功耗|CPU power
+gpuUtilCard|GPU 使用率|GPU 使用率|GPU usage
+gpuMemCard|GPU 显存|GPU 記憶體|GPU memory
+gpuClockCard|GPU 频率|GPU 頻率|GPU clock
+pchCard|PCH 温度|PCH 溫度|PCH temperature
+dgxGpuPwrCard|DGX GPU 功耗|DGX GPU 功耗|DGX GPU power
+dgxGpuUtilCard|DGX GPU 使用率|DGX GPU 使用率|DGX GPU usage
+dgxMemPctCard|DGX 内存使用率|DGX 記憶體使用率|DGX memory usage
+networkUp|网络速率 · 上传|網路速率 · 上傳|Network upload
+cardManagerHint|共 {0} 项，可滚动|共 {0} 項，可捲動|{0} items - scroll for more
+networkDownShort|下载 {0} {1}|下載 {0} {1}|Download {0} {1}

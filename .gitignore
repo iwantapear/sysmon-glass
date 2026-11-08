@@ -1,0 +1,27 @@
+# Build output
+bin/
+obj/
+artifacts/
+publish/
+test-output/
+build-source-*/
+*.dll
+*.exe
+*.pdb
+*.zip
+
+# Local machine state (never publish: host list, layout, coordinates)
+sysmon.json
+settings.json
+*.log
+
+# Screenshots / evidence / backups
+*.png
+*.jpg
+backups/
+evidence/
+
+# Signing material
+*.pfx
+*.cer
+*.snk

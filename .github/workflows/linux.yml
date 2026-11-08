@@ -1,0 +1,57 @@
+# Builds and self-tests the repository on Linux, which is what the portable
+# (Avalonia) target ships for. The WPF implementation is Windows-only and is
+# covered by the PowerShell suites instead.
+name: linux
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rid: [linux-x64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Publish (${{ matrix.rid }})
+        run: |
+          dotnet publish portable/SysMon.Glass.csproj -c Release -r ${{ matrix.rid }} \
+            --self-contained true -p:PublishSingleFile=true \
+            -p:IncludeNativeLibrariesForSelfExtract=true \
+            -p:EnableCompressionInSingleFile=true -p:DebugType=None -p:DebugSymbols=false \
+            -o out/${{ matrix.rid }}
+
+      - name: Self-test (no display needed)
+        run: |
+          chmod +x out/${{ matrix.rid }}/SysMon.Glass
+          ./out/${{ matrix.rid }}/SysMon.Glass --self-test
+
+      - name: GUI smoke test under Xvfb
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq xvfb xdotool scrot
+          export DISPLAY=:99
+          Xvfb :99 -screen 0 1600x900x24 -nolisten tcp &
+          sleep 2
+          ./out/${{ matrix.rid }}/SysMon.Glass > gui.log 2>&1 &
+          APP=$!
+          sleep 10
+          if ! kill -0 $APP 2>/dev/null; then echo "application exited unexpectedly"; cat gui.log; exit 1; fi
+          xdotool search --onlyvisible --name 'SysMon Glass' >/dev/null || { cat gui.log; exit 1; }
+          scrot gui.png
+          kill $APP || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SysMon.Glass-${{ matrix.rid }}
+          path: out/${{ matrix.rid }}/SysMon.Glass
+          if-no-files-found: error

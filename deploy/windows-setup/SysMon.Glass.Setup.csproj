@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>SysMon.Glass.Setup</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>../sysmon.ico</ApplicationIcon>
+    <EnableDefaultEmbeddedResourceItems>false</EnableDefaultEmbeddedResourceItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="../install-windows.ps1" LogicalName="install.ps1" />
+    <EmbeddedResource Include="$(PayloadZip)" LogicalName="payload.zip" Condition="Exists('$(PayloadZip)')" />
+  </ItemGroup>
+  <Target Name="RequirePayload" BeforeTargets="Build" Condition="'$(RequirePayload)' == 'true' and !Exists('$(PayloadZip)')">
+    <Error Text="Build setup with -p:PayloadZip=absolute-path-to-payload.zip" />
+  </Target>
+</Project>
