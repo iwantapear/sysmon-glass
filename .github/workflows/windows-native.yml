@@ -30,12 +30,11 @@ jobs:
           # differ between MSYS2 distributions; app falls back to a stock icon.
           # setup-msys2 uses D:\msys64 on GitHub-hosted runners; local builds
           # commonly use C:\msys64. Resolve the root instead of hardcoding it.
-          Get-ChildItem -Path C:\,D:\ -Directory -Filter msys64 -Recurse -Depth 4 -ErrorAction SilentlyContinue |
-            Select-Object -ExpandProperty FullName | ForEach-Object { Write-Host "MSYS2 found: $_" }
-          # setup-msys2 may install under the hosted tool cache rather than C:\msys64.
-          $msysRoot = @('C:\tools\msys64','D:\tools\msys64','C:\msys64','D:\msys64') |
-            Where-Object { Test-Path (Join-Path $_ 'ucrt64\bin\g++.exe') } | Select-Object -First 1
+          $msysRoot = Get-ChildItem -Path C:\,D:\ -Directory -Filter msys64 -Recurse -Depth 4 -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path (Join-Path $_.FullName 'ucrt64\bin\g++.exe') } |
+            Select-Object -First 1 -ExpandProperty FullName
           if(-not $msysRoot){ throw 'g++ not found in any standard MSYS2 location' }
+          Write-Host "Using MSYS2 at $msysRoot"
           $gpp = Join-Path $msysRoot 'ucrt64\bin\g++.exe'
           if(-not (Test-Path $gpp)){ throw "g++ not found under $msysRoot" }
           & $gpp -std=c++20 -O2 -mwindows -DUNICODE -D_UNICODE `
