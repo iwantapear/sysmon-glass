@@ -144,6 +144,25 @@ bash deploy/artifacts/linux-x64/install-linux.sh --uninstall   # 保留配置
 | `SYSMON_RID` | 运行时标识 | 按 `uname -m` 自动 |
 | `SYSMON_NO_AUTOSTART=1` | 不创建自启项 | 创建 |
 
+### 界面与语言
+
+Linux/macOS 版与 Windows 版**共用同一套视觉语言**：玻璃渐变卡片、圆角描边、顶部高光，
+每张卡片右下角显示该指标的**最大/最小/均值**与**动态曲线**。
+
+界面默认简体中文（Windows 版同为中文）；系统语言为 zh-TW/zh-HK 时自动使用繁体。
+偏好英文可在「主机 / 设置 → 界面语言」中切换（跟随系统 / 简体 / 繁體 / English）。
+
+> 说明：Windows 侧独有的能力在 Linux 上不提供——桌面置底（图标镂空/点击穿透）、
+> DWM 亚克力、窗口边缘拖动。这些依赖 Win32 窗口层级，Avalonia 在 X11/Wayland 上无等价机制。
+
+### 性能
+
+每 2–5 秒一次采样，界面**只在数据变化时更新文本**，且仅当列数改变时才重建卡片布局
+（早期版本在窗口每像素变化时重建全部卡片，是 Linux 卡顿的根因，已修复）。
+
+在 DGX Spark（arm64，**无 GPU 的软件渲染 Xvfb**）实测：空闲 CPU ≈ 3%，连续 10 次改变窗口尺寸
+期间 CPU ≈ 15%。有硬件加速的桌面环境会更平滑；无显示器的机器请用 `xvfb-run`。
+
 ### 已验证环境
 
 `linux-arm64 / Ubuntu 26.04 (DGX Spark, GB10)`：一键脚本、self-test、Xvfb 下 GUI、菜单项与自启项全部实测通过。

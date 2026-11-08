@@ -12,6 +12,21 @@ The executable name is `SysMon.Glass`. Run the dependency-free invariants check 
 dotnet run --project portable/SysMon.Glass.csproj -- --self-test
 ```
 
+## Language
+
+Chinese by default (`zh-CN`; `zh-TW` for Hant locales), with a picker in the settings
+dialog for 跟随系统 / 简体中文 / 繁體中文 / English. Strings live in `Localization.cs`
+and mirror the keys used by the Windows build (`locale/strings.psv`).
+
+## Parity with the Windows build
+
+Shared: glass gradient cards with rim and gloss, per-card rolling max/min/mean and a
+sparkline, eleven palettes, language selection, edit mode with drag reordering,
+click-through detail windows.
+
+Windows-only (no equivalent on X11/Wayland): bottom-layer desktop mode with icon-hole
+masking and click-through, DWM acrylic, and window-rim dragging via `WM_NCHITTEST`.
+
 ## Boundaries
 
 - The dashboard uses real local sources only: Windows API memory/CPU, Linux `/proc`, macOS `sysctl`/`vm_stat`, fixed-volume disk, active network interfaces, configurable fan state file, and `nvidia-smi` where present. Missing sensors display **Unavailable**, never invented values.

@@ -1,22 +1,25 @@
 using System.Text.Json;
 
 namespace SysMon.Glass.Core;
-public record CardDefinition(string Id, string Title, string Metric, int DefaultSpan, string Accent);
+public record CardDefinition(string Id, string TitleKey, string Metric, int DefaultSpan, string Accent)
+{
+    public string Title => L10n.T(TitleKey);
+}
 public static class Cards
 {
     public static readonly CardDefinition[] All = [
-        new("cpu", "PROCESSOR", "cpu", 2, "#86BFFF"), new("memory", "MEMORY", "memory", 1, "#B3A1FF"),
-        new("gpu", "GRAPHICS", "gpu", 1, "#79EDD3"), new("gpuTemp", "GPU TEMPERATURE", "gpuTemp", 1, "#FFBC96"),
-        new("gpuMemory", "VIDEO MEMORY", "gpuMemory", 1, "#B3A1FF"), new("disk", "STORAGE", "disk", 2, "#86BFFF"),
-        new("network", "NETWORK", "network", 2, "#79EDD3"), new("fan", "FANS", "fan", 1, "#79EDD3"),
-        new("cpuTemp", "CPU TEMPERATURE", "cpuTemp", 1, "#FFBC96"), new("power", "GPU POWER", "power", 1, "#FFD982"),
-        new("uptime", "UPTIME", "uptime", 1, "#86BFFF"), new("os", "OPERATING SYSTEM", "os", 2, "#B3A1FF"),
-        new("host", "HOST", "host", 1, "#79EDD3"), new("runtime", "RUNTIME", "runtime", 1, "#FFD982")];
+        new("cpu", "card.cpu", "cpu", 2, "#86BFFF"), new("memory", "card.memory", "memory", 1, "#B3A1FF"),
+        new("gpu", "card.gpu", "gpu", 1, "#79EDD3"), new("gpuTemp", "card.gpuTemp", "gpuTemp", 1, "#FFBC96"),
+        new("gpuMemory", "card.gpuMemory", "gpuMemory", 1, "#B3A1FF"), new("disk", "card.disk", "disk", 2, "#86BFFF"),
+        new("network", "card.network", "network", 2, "#79EDD3"), new("fan", "card.fan", "fan", 1, "#79EDD3"),
+        new("cpuTemp", "card.cpuTemp", "cpuTemp", 1, "#FFBC96"), new("power", "card.power", "power", 1, "#FFD982"),
+        new("uptime", "card.uptime", "uptime", 1, "#86BFFF"), new("os", "card.os", "os", 2, "#B3A1FF"),
+        new("host", "card.host", "host", 1, "#79EDD3"), new("runtime", "card.runtime", "runtime", 1, "#FFD982")];
 }
 public sealed class HostProfile
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
-    public string Name { get; set; } = "Local machine";
+    public string Name { get; set; } = L10n.T("host.local");
     public bool Remote { get; set; }
     public string Address { get; set; } = "";
     public string User { get; set; } = "";
@@ -35,6 +38,8 @@ public sealed class UserSettings
     public bool StartupEnabled { get; set; } = true;
     public string Theme { get; set; } = "dark";
     public int PollSeconds { get; set; } = 3;
+    /// <summary>Empty = follow the OS locale; otherwise zh-CN / zh-TW / en.</summary>
+    public string Language { get; set; } = "";
     public List<HostProfile> Hosts { get; set; } = [new()];
     public string SelectedHost { get; set; } = "";
     public List<CardLayout> Layout { get; set; } = Cards.All.Select(c => new CardLayout { Id = c.Id, Span = c.DefaultSpan }).ToList();
@@ -42,8 +47,9 @@ public sealed class UserSettings
     {
         PollSeconds = Math.Clamp(PollSeconds, 2, 60);
         Hosts = (Hosts ?? []).Where(h => h is not null).Take(32).ToList(); if (Hosts.Count == 0) Hosts.Add(new());
-        foreach (var h in Hosts) { h.Id = string.IsNullOrWhiteSpace(h.Id) ? Guid.NewGuid().ToString("N") : h.Id[..Math.Min(h.Id.Length, 128)]; h.Name ??= "Host"; h.Address ??= ""; h.User ??= ""; h.IdentityFile ??= ""; h.KnownHostsFile ??= ""; h.FanStatePath ??= ""; h.Port = Math.Clamp(h.Port, 1, 65535); }
-        SelectedHost ??= ""; Theme = new[] { "light", "dark", "sunset", "rose", "violet", "aurora", "neon", "flame", "ocean", "forest", "amber" }.Contains(Theme) ? Theme : "dark";
+        foreach (var h in Hosts) { h.Id = string.IsNullOrWhiteSpace(h.Id) ? Guid.NewGuid().ToString("N") : h.Id[..Math.Min(h.Id.Length, 128)]; h.Name ??= L10n.T("host.local"); h.Address ??= ""; h.User ??= ""; h.IdentityFile ??= ""; h.KnownHostsFile ??= ""; h.FanStatePath ??= ""; h.Port = Math.Clamp(h.Port, 1, 65535); }
+        foreach (var h in Hosts) if (h.Name == "Local machine") h.Name = L10n.T("host.local");
+        Language = L10n.Normalize(Language); SelectedHost ??= ""; Theme = new[] { "light", "dark", "sunset", "rose", "violet", "aurora", "neon", "flame", "ocean", "forest", "amber" }.Contains(Theme) ? Theme : "dark";
         Layout = (Layout ?? []).Where(c => c is not null).Take(64).Where(c => Cards.All.Any(d => d.Id == c.Id)).DistinctBy(c => c.Id).ToList();
         foreach (var c in Layout) c.Span = Math.Clamp(c.Span, 1, 2);
         if (OperatingSystem.IsWindows() && string.IsNullOrWhiteSpace(Hosts[0].FanStatePath)) { var fan = @"E:\C++\fan-tuning\state.json"; if (File.Exists(fan)) Hosts[0].FanStatePath = fan; }
@@ -73,7 +79,7 @@ public static class GridLayout
 }
 public record Metric(string Value, string Detail, bool Available = true)
 {
-    public static Metric Missing(string reason) => new("Unavailable", reason, false);
+    public static Metric Missing(string reason) => new(L10n.T("state.unavailable"), reason, false);
 }
 public record Snapshot(DateTimeOffset At, IReadOnlyDictionary<string, Metric> Metrics, string Status, string HostId = "");
 public interface IMetricProvider { Task<Snapshot> CollectAsync(HostProfile host, CancellationToken token); }

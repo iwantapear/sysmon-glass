@@ -18,6 +18,9 @@ settings.json
 # Screenshots / evidence / backups
 *.png
 *.jpg
+# ...but ship the icons the app needs to build and run
+!portable/Assets/tray.png
+!deploy/sysmon.png
 backups/
 evidence/
 
