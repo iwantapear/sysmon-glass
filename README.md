@@ -178,6 +178,7 @@ MIT — see [LICENSE](LICENSE).
 |---|---|
 | `glass.ps1`, `modules/`, `ui/`, `locale/` | 当前 Windows 实现（PowerShell + WPF） |
 | `native/` | C# 原生互操作（窗口命中测试、SSH 轮询、桌面图标遮罩） |
+| `cpp/app/` | **C++ 原生 Windows 实现**（Win32 + Direct2D/DirectWrite，无需 .NET/pwsh） |
 | `portable/` | Avalonia 跨平台实现（Windows/macOS/Linux） |
 | `tests/` | 回归测试（`pwsh -STA -NoProfile -File tests/<Name>.Tests.ps1`） |
 | `deploy/` | 打包与安装脚本（不含构建产物） |

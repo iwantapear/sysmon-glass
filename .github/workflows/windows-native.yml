@@ -1,0 +1,42 @@
+# Builds the Windows-native C++ implementation on a clean runner. Unlike the
+# Linux workflow this does not launch a GUI (desktop underlay needs a real shell).
+name: windows-native
+
+on:
+  push:
+    branches: [master]
+    paths: ['cpp/app/**', '.github/workflows/windows-native.yml']
+  pull_request:
+    paths: ['cpp/app/**', '.github/workflows/windows-native.yml']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: mingw-w64-ucrt-x86_64-gcc
+
+      - name: Compile native executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          Push-Location cpp/app
+          C:\msys64\ucrt64\bin\windres.exe app.rc -O coff -o app-res.o
+          C:\msys64\ucrt64\bin\g++.exe -std=c++20 -O2 -mwindows -DUNICODE -D_UNICODE `
+            -o sysmon.exe app.cpp app-res.o `
+            -ld2d1 -ldwrite -ldwmapi -lcomctl32 -lole32 -loleaut32 -luuid `
+            -luiautomationcore -liphlpapi -lshell32 -lgdi32 -luser32
+          if($LASTEXITCODE){ throw 'native build failed' }
+          Get-Item sysmon.exe | Select-Object FullName,Length
+          Pop-Location
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SysMon.Glass-native-win-x64
+          path: cpp/app/sysmon.exe
+          if-no-files-found: error
