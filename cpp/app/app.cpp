@@ -509,9 +509,12 @@ static void DrawCard(ID2D1RenderTarget* target, const Placement& placement, D2D1
     // Place the unit after the measured value width, not at a fixed fraction of
     // the value box (which overlapped long values such as 2,066).
     const float measured = MeasureTextWidth(value, g_fmtValue);
-    const float unitLeft = std::min(rect.right - 130.0f, rect.left + 22 + measured + 10.0f);
+    // Keep a real unit box even for four-digit values: clamping both edges to
+    // rect.right-130 previously made its width zero and hid RPM/GB/°C.
+    const float statsLeft = rect.right - 132.0f;
+    const float unitLeft = std::min(statsLeft - 44.0f, rect.left + 22 + measured + 10.0f);
     DrawText(target, FormatUnitForCard(card), g_fmtUnit,
-             D2D1::RectF(unitLeft, rect.top + 78, rect.right - 130, rect.top + 108), secondary);
+             D2D1::RectF(unitLeft, rect.top + 78, statsLeft - 6.0f, rect.top + 108), secondary);
 
     // Rolling max/min/mean on the right.
     auto history = g_history.find(card.key);
