@@ -20,6 +20,6 @@ Write-Host ("window {0}x{1} at {2},{3}" -f $w,$h,$r.Left,$r.Top)
 $bmp = New-Object System.Drawing.Bitmap $w,$h
 $g = [System.Drawing.Graphics]::FromImage($bmp)
 $g.CopyFromScreen($r.Left,$r.Top,0,0,$bmp.Size)
-$bmp.Save('<repo>\evidence\bug-done-20261108\cpp-bottom-clear.png',[System.Drawing.Imaging.ImageFormat]::Png)
+$bmp.Save('<repo>\evidence\bug-done-20261108\rail-off-latest.png',[System.Drawing.Imaging.ImageFormat]::Png)
 $g.Dispose();$bmp.Dispose()
 Write-Host 'captured'

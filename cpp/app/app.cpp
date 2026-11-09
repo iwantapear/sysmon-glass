@@ -509,12 +509,11 @@ static void DrawCard(ID2D1RenderTarget* target, const Placement& placement, D2D1
     // Place the unit after the measured value width, not at a fixed fraction of
     // the value box (which overlapped long values such as 2,066).
     const float measured = MeasureTextWidth(value, g_fmtValue);
-    // Keep a real unit box even for four-digit values: clamping both edges to
-    // rect.right-130 previously made its width zero and hid RPM/GB/°C.
-    const float statsLeft = rect.right - 132.0f;
-    const float unitLeft = std::min(statsLeft - 44.0f, rect.left + 22 + measured + 10.0f);
+    // Draw the unit directly after the measured number and let it use the rest
+    // of the card. A second clamp against the stats lane hid °C and RPM.
+    const float unitLeft = rect.left + 22 + measured + 10.0f;
     DrawText(target, FormatUnitForCard(card), g_fmtUnit,
-             D2D1::RectF(unitLeft, rect.top + 78, statsLeft - 6.0f, rect.top + 108), secondary);
+             D2D1::RectF(unitLeft, rect.top + 78, rect.right - 18.0f, rect.top + 108), secondary);
 
     // Rolling max/min/mean on the right.
     auto history = g_history.find(card.key);
@@ -763,6 +762,16 @@ static void ApplyRegion() {
         CombineRgn(region, region, whole, RGN_OR);
         DeleteObject(whole);
     } else {
+        if (g_settings.insightsRail) {
+            // The rail is interactive like a card and must remain in the region.
+            const int left = (int)(1192 * scale);
+            const int top = (int)(12 * scale);
+            const int right = (int)((1192 + 300) * scale);
+            const int bottom = (int)((ContentViewHeight() - 12) * scale);
+            HRGN rail = CreateRectRgn(left, top, right, bottom);
+            CombineRgn(region, region, rail, RGN_OR);
+            DeleteObject(rail);
+        }
         for (const auto& icon : DesktopIconRects()) {
             HRGN hole = CreateRectRgn(icon.left - window.left, icon.top - window.top,
                                       icon.right - window.left, icon.bottom - window.top);
