@@ -35,7 +35,8 @@ static void DrawEditToolbar(ID2D1RenderTarget* target, const theme::Palette& pal
     drawButton(g_scaleDownRect, L"−"); x += 44;
     const double scale = desktop ? g_settings.desktopScale : (g_settings.normalWidthDip > 0 ? g_settings.normalWidthDip / 1600.0 : 1.0);
     wchar_t percent[32];
-    std::swprintf(percent, 32, L"%d%%", (int)std::lround(scale * 100.0));
+    if (desktop && scale <= 0.001) std::swprintf(percent, 32, L"auto");
+    else std::swprintf(percent, 32, L"%d%%", (int)std::lround(scale * 100.0));
     DrawText(target, percent, g_fmtButton, D2D1::RectF(x, 17, x + 56, 43), text);
     x += 60;
     g_scaleUpRect = RECT{ (LONG)x, 13, (LONG)(x + 38), 45 };

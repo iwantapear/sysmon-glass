@@ -202,9 +202,17 @@ static void ComputeGeometry(RECT work, double requestedWidth, POINT position, bo
     outPosition = POINT{ x, y };
 }
 
+static RECT WorkAreaAt(POINT point) {
+    HMONITOR monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    if (monitor && GetMonitorInfoW(monitor, &info)) return info.rcWork;
+    RECT fallback{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &fallback, 0);
+    return fallback;
+}
+
 static void ApplyPlacement(bool useCurrentPosition) {
-    RECT work{};
-    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
     bool desktop = IsDesktopMode();
     RECT window{};
     GetWindowRect(g_hwnd, &window);
@@ -214,6 +222,8 @@ static void ApplyPlacement(bool useCurrentPosition) {
                           (LONG)(desktop ? g_settings.desktopY : g_settings.normalY) };
     }
     double width = desktop ? (g_settings.desktopScale * 1600.0) : g_settings.normalWidthDip;
+    const POINT monitorPoint{ position.x + 40, position.y + 40 };
+    const RECT work = WorkAreaAt(monitorPoint);
     int widthPx = 0, heightPx = 0;
     POINT topLeft{};
     ComputeGeometry(work, width, position, desktop, widthPx, heightPx, topLeft);
@@ -388,7 +398,10 @@ static std::wstring CardDetail(const CardDef& card) {
     if (key == "dgxLoad") return T(L"已运行 ", L"已執行 ", L"up ") + value("dgxUp") + T(L" 小时", L" 小時", L" h");
     if (key == "netDown") return T(L"上传 ", L"上傳 ", L"up ") + value("netUp");
     if (key == "netUp") return T(L"下载 ", L"下載 ", L"down ") + value("netDown");
-    if (key == "diskPct") return value("diskUsed") + L" / " + value("diskTotal") + L" GB";
+    if (key == "diskPct") {
+        const std::wstring summary = value("diskUsed") + L" / " + value("diskTotal") + L" GB";
+        return g_snapshot.diskDetail.empty() ? summary : summary + L" · " + g_snapshot.diskDetail;
+    }
     return {};
 }
 
@@ -551,8 +564,25 @@ static void Render() {
     g_target->BeginDraw();
     g_target->SetTransform(D2D1::Matrix3x2F::Identity());
     // Desktop mode is transparent so the wallpaper shows through the gaps.
-    g_target->Clear(IsDesktopMode() ? D2D1::ColorF(0, 0.0f) : ToColorF(palette.bg[0]));
+    g_target->Clear(IsDesktopMode() ? D2D1::ColorF(0, 0.0f) : D2D1::ColorF(0, 0.0f));
     g_target->SetTransform(D2D1::Matrix3x2F::Scale(g_scale, g_scale));
+    if (!IsDesktopMode()) {
+        const D2D1_GRADIENT_STOP stops[3] = {
+            { 0.0f, ToColorF(palette.bg[0]) },
+            { 0.52f, ToColorF(palette.bg[1]) },
+            { 1.0f, ToColorF(palette.bg[2]) }
+        };
+        ID2D1GradientStopCollection* collection = nullptr;
+        ID2D1LinearGradientBrush* background = nullptr;
+        if (SUCCEEDED(g_target->CreateGradientStopCollection(stops, 3, &collection)) && collection &&
+            SUCCEEDED(g_target->CreateLinearGradientBrush(
+                D2D1::LinearGradientBrushProperties(D2D1::Point2F(0, 0), D2D1::Point2F(kLogicalWidth, LogicalHeight())),
+                collection, &background)) && background) {
+            g_target->FillRectangle(D2D1::RectF(0, 0, kLogicalWidth, LogicalHeight()), background);
+            background->Release();
+        }
+        if (collection) collection->Release();
+    }
 
     const D2D1_SIZE_F size = D2D1::SizeF(kLogicalWidth, LogicalHeight());
     if (!IsDesktopMode()) {
@@ -755,8 +785,26 @@ static void ShowPanel(bool visible) {
     ShowWindow(g_hwnd, visible ? SW_SHOWNOACTIVATE : SW_HIDE);
     if (visible) {
         ApplyPlacement(false);
+        if (!IsDesktopMode()) {
+            // A new normal-mode window must not start behind the active terminal.
+            SetWindowPos(g_hwnd, g_settings.layerMode == "top" ? HWND_TOPMOST : HWND_TOP,
+                         0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+            SetForegroundWindow(g_hwnd);
+        }
         InvalidateRect(g_hwnd, nullptr, FALSE);
     }
+}
+
+static void UpdateBackdrop() {
+    if (!g_hwnd) return;
+    // Blur only the normal window backdrop. Bottom mode must remain transparent
+    // so the desktop wallpaper and icons show through the card gaps.
+    DWM_BLURBEHIND blur{};
+    blur.dwFlags = DWM_BB_ENABLE | DWM_BB_BLURREGION;
+    blur.fEnable = IsDesktopMode() ? FALSE : TRUE;
+    blur.hRgnBlur = CreateRectRgn(0, 0, 32767, 32767);
+    DwmEnableBlurBehindWindow(g_hwnd, &blur);
+    if (blur.hRgnBlur) DeleteObject(blur.hRgnBlur);
 }
 
 static void SetLayerMode(const std::string& mode, bool persist) {
@@ -772,6 +820,7 @@ static void SetLayerMode(const std::string& mode, bool persist) {
     SetWindowLongPtrW(g_hwnd, GWL_EXSTYLE, ex);
     SetWindowPos(g_hwnd, mode == "top" ? HWND_TOPMOST : (mode == "bottom" ? HWND_BOTTOM : HWND_NOTOPMOST),
                  0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    UpdateBackdrop();
     ApplyPlacement(false);
     if (persist) cfg::Save(g_settings);
     g_regionDirty = true;
@@ -779,7 +828,8 @@ static void SetLayerMode(const std::string& mode, bool persist) {
 
 static void StepScale(double delta) {
     if (IsDesktopMode()) {
-        g_settings.desktopScale = std::min(2.0, std::max(0.4, g_settings.desktopScale + delta));
+        const double current = g_settings.desktopScale > 0.001 ? g_settings.desktopScale : (g_scale > 0.001 ? g_scale : 1.0);
+        g_settings.desktopScale = std::min(2.0, std::max(0.4, current + delta));
     } else {
         double width = g_settings.normalWidthDip > 0 ? g_settings.normalWidthDip : 1600.0;
         width = std::min(3840.0, std::max(800.0, width * (1.0 + delta)));
@@ -788,6 +838,32 @@ static void StepScale(double delta) {
     }
     ApplyPlacement(true);
     cfg::Save(g_settings);
+}
+
+static std::wstring NativeExePath() {
+    wchar_t path[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, path, MAX_PATH);
+    return L"\"" + std::wstring(path) + L"\"";
+}
+static bool IsAutoStartEnabled() {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_READ, &key) != ERROR_SUCCESS) return false;
+    wchar_t value[MAX_PATH * 2] = {};
+    DWORD size = sizeof(value), type = 0;
+    const bool present = RegQueryValueExW(key, L"SysMon.Glass", nullptr, &type, (LPBYTE)value, &size) == ERROR_SUCCESS;
+    RegCloseKey(key);
+    return present;
+}
+static void SetAutoStart(bool enabled) {
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, nullptr, 0, KEY_WRITE, nullptr, &key, nullptr) != ERROR_SUCCESS) return;
+    if (enabled) {
+        const std::wstring command = NativeExePath();
+        RegSetValueExW(key, L"SysMon.Glass", 0, REG_SZ, (const BYTE*)command.c_str(), DWORD((command.size() + 1) * sizeof(wchar_t)));
+    } else {
+        RegDeleteValueW(key, L"SysMon.Glass");
+    }
+    RegCloseKey(key);
 }
 
 static void ShowDetail(int index) {
@@ -803,6 +879,7 @@ static void ShowDetail(int index) {
 }
 
 #include "manager.h"
+#include "remote.h"
 
 static void ShowContextMenu(int x, int y) {
     HMENU menu = CreatePopupMenu();
@@ -829,6 +906,18 @@ static void ShowContextMenu(int x, int y) {
     AppendMenuW(materials, MF_STRING | (g_settings.material == "frosted" ? MF_CHECKED : 0), 301, L"frosted");
     AppendMenuW(materials, MF_STRING | (g_settings.material == "solid" ? MF_CHECKED : 0), 302, L"solid");
     AppendMenuW(menu, MF_POPUP, (UINT_PTR)materials, T(L"材质", L"材質", L"Material").c_str());
+    HMENU languages = CreatePopupMenu();
+    AppendMenuW(languages, MF_STRING | (g_language == "zh-CN" ? MF_CHECKED : 0), 1000, L"简体中文");
+    AppendMenuW(languages, MF_STRING | (g_language == "zh-TW" ? MF_CHECKED : 0), 1001, L"繁體中文");
+    AppendMenuW(languages, MF_STRING | (g_language == "en" ? MF_CHECKED : 0), 1002, L"English");
+    AppendMenuW(menu, MF_POPUP, (UINT_PTR)languages, T(L"界面语言", L"介面語言", L"Language").c_str());
+    HMENU rates = CreatePopupMenu();
+    AppendMenuW(rates, MF_STRING | (g_settings.interval == 1000 ? MF_CHECKED : 0), 1010, L"1s");
+    AppendMenuW(rates, MF_STRING | (g_settings.interval == 2000 ? MF_CHECKED : 0), 1011, L"2s");
+    AppendMenuW(rates, MF_STRING | (g_settings.interval == 3000 ? MF_CHECKED : 0), 1012, L"3s");
+    AppendMenuW(rates, MF_STRING | (g_settings.interval == 5000 ? MF_CHECKED : 0), 1013, L"5s");
+    AppendMenuW(menu, MF_POPUP, (UINT_PTR)rates, T(L"刷新频率", L"刷新頻率", L"Refresh rate").c_str());
+    AppendMenuW(menu, MF_STRING | (IsAutoStartEnabled() ? MF_CHECKED : 0), 1020, T(L"登录时启动", L"登入時啟動", L"Start at login").c_str());
     HMENU layers = CreatePopupMenu();
     AppendMenuW(layers, MF_STRING | (g_settings.layerMode == "top" ? MF_CHECKED : 0), 400, T(L"置顶", L"置頂", L"Top").c_str());
     AppendMenuW(layers, MF_STRING | (g_settings.layerMode == "normal" ? MF_CHECKED : 0), 401, T(L"普通", L"普通", L"Normal").c_str());
@@ -836,6 +925,7 @@ static void ShowContextMenu(int x, int y) {
     AppendMenuW(menu, MF_POPUP, (UINT_PTR)layers, T(L"窗口图层", L"視窗圖層", L"Window layer").c_str());
     AppendMenuW(menu, MF_STRING | (g_settings.insightsRail ? MF_CHECKED : 0), 500, T(L"洞察栏", L"洞察欄", L"Insights rail").c_str());
     AppendMenuW(menu, MF_STRING, 800, T(L"卡片管理…", L"卡片管理…", L"Card manager…").c_str());
+    AppendMenuW(menu, MF_STRING, 900, T(L"远程主机…", L"遠端主機…", L"Remote hosts…").c_str());
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, 600, T(L"隐藏", L"隱藏", L"Hide").c_str());
     AppendMenuW(menu, MF_STRING, 601, T(L"退出", L"結束", L"Quit").c_str());
@@ -855,6 +945,20 @@ static void ShowContextMenu(int x, int y) {
     case 704: StepScale(-0.05); break;
     case 705: StepScale(0.05); break;
     case 800: ShowCardManager(g_hwnd); break;
+    case 900: ShowRemoteEditor(g_hwnd); break;
+    case 1000: case 1001: case 1002:
+        g_language = command == 1000 ? "zh-CN" : (command == 1001 ? "zh-TW" : "en");
+        g_settings.language = g_language;
+        cfg::Save(g_settings);
+        break;
+    case 1010: case 1011: case 1012: case 1013: {
+        g_settings.interval = command == 1010 ? 1000 : (command == 1011 ? 2000 : (command == 1012 ? 3000 : 5000));
+        if (g_timerId) KillTimer(g_hwnd, g_timerId);
+        g_timerId = SetTimer(g_hwnd, 1, UINT(g_settings.interval), nullptr);
+        cfg::Save(g_settings);
+        break;
+    }
+    case 1020: SetAutoStart(!IsAutoStartEnabled()); break;
     case 200: case 201: case 202: case 203: case 204: case 205: case 206: case 207: case 208: case 209: case 210: {
         auto order = theme::Order();
         g_settings.theme = order[size_t(command - 200)];
@@ -1090,9 +1194,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_DPICHANGED: {
         RECT* suggested = (RECT*)lParam;
-        SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
-                     suggested->right - suggested->left, suggested->bottom - suggested->top,
-                     SWP_NOZORDER | SWP_NOACTIVATE);
+        // Windows' suggested rectangle may shrink the panel on a DPI transition.
+        // Keep the user's physical size and let ApplyPlacement recompute the scale.
+        SetWindowPos(hwnd, nullptr, suggested->left, suggested->top, 0, 0,
+                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        ApplyPlacement(true);
         return 0;
     }
 
