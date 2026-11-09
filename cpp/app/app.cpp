@@ -337,6 +337,17 @@ static void DrawText(ID2D1RenderTarget* target, const std::wstring& text, IDWrit
     target->DrawTextW(text.c_str(), (UINT32)text.size(), format, box, brush);
 }
 
+static float MeasureTextWidth(const std::wstring& text, IDWriteTextFormat* format) {
+    if (!g_dwrite || !format) return 0;
+    IDWriteTextLayout* layout = nullptr;
+    const HRESULT hr = g_dwrite->CreateTextLayout(text.c_str(), (UINT32)text.size(), format, 1000, 1000, &layout);
+    if (FAILED(hr) || !layout) return 0;
+    DWRITE_TEXT_METRICS metrics{};
+    layout->GetMetrics(&metrics);
+    layout->Release();
+    return metrics.width;
+}
+
 static std::wstring FormatNumber(double value, bool temperature) {
     wchar_t buffer[64];
     if (std::fabs(value) < 10) std::swprintf(buffer, 64, L"%.1f", value);
@@ -495,9 +506,12 @@ static void DrawCard(ID2D1RenderTarget* target, const Placement& placement, D2D1
     // Value + unit.
     const std::wstring value = FormatValueForCard(card);
     DrawText(target, value, g_fmtValue, D2D1::RectF(rect.left + 22, rect.top + 46, rect.right - 150, rect.top + 108), textBrush);
-    const float valueWidth = std::min((rect.right - 150) - (rect.left + 22), 132.0f);
+    // Place the unit after the measured value width, not at a fixed fraction of
+    // the value box (which overlapped long values such as 2,066).
+    const float measured = MeasureTextWidth(value, g_fmtValue);
+    const float unitLeft = std::min(rect.right - 130.0f, rect.left + 22 + measured + 10.0f);
     DrawText(target, FormatUnitForCard(card), g_fmtUnit,
-             D2D1::RectF(rect.left + 22 + valueWidth * 0.42f, rect.top + 78, rect.right - 130, rect.top + 108), secondary);
+             D2D1::RectF(unitLeft, rect.top + 78, rect.right - 130, rect.top + 108), secondary);
 
     // Rolling max/min/mean on the right.
     auto history = g_history.find(card.key);
@@ -526,7 +540,9 @@ static void DrawCard(ID2D1RenderTarget* target, const Placement& placement, D2D1
         }
     }
 
-    DrawText(target, CardDetail(card), g_fmtSmall, D2D1::RectF(rect.left + 22, rect.bottom - 42, rect.right - 22, rect.bottom - 16), secondary);
+    // Detail text stops before the sparkline lane instead of sharing its pixels.
+    DrawText(target, CardDetail(card), g_fmtSmall,
+             D2D1::RectF(rect.left + 22, rect.bottom - 42, rect.right - 164, rect.bottom - 16), secondary);
     accent->Release();
     textBrush->Release();
     secondary->Release();
@@ -549,6 +565,36 @@ static void DrawHeader(ID2D1RenderTarget* target, D2D1_SIZE_F size, const theme:
         std::wstring status = g_statusText.empty() ? T(L"启动中", L"啟動中", L"starting") : g_statusText;
         DrawText(target, status, g_fmtSmall, D2D1::RectF(48, size.height - 42, size.width - 48, size.height - 16), secondary);
     }
+    // Status pill and header buttons mirror StatusBorder / ThemeButton / HideButton.
+    ID2D1SolidColorBrush* pill = nullptr;
+    ID2D1SolidColorBrush* pillRim = nullptr;
+    ID2D1SolidColorBrush* dot = nullptr;
+    target->CreateSolidColorBrush(ToColorF(palette.pillBg), &pill);
+    target->CreateSolidColorBrush(ToColorF(palette.pillBorder), &pillRim);
+    target->CreateSolidColorBrush(ToColorF(g_snapshot.remoteFresh ? 0xFF6EE7ACu : 0xFFFF727Cu), &dot);
+    const float right = size.width;
+    const D2D1_RECT_F statusRect = D2D1::RectF(right - 566, 20, right - 256, 58);
+    if (pill) target->FillRoundedRectangle(D2D1::RoundedRect(statusRect, 18, 18), pill);
+    if (pillRim) target->DrawRoundedRectangle(D2D1::RoundedRect(statusRect, 18, 18), pillRim, 1.0f);
+    if (dot) target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(statusRect.left + 18, statusRect.top + 19), 4, 4), dot);
+    const std::wstring status = g_statusText.empty() ? T(L"启动中", L"啟動中", L"starting") : g_statusText;
+    DrawText(target, status, g_fmtSmall,
+             D2D1::RectF(statusRect.left + 32, statusRect.top + 8, statusRect.right - 10, statusRect.bottom - 4), text ? text : secondary);
+
+    g_themeRect = RECT{ (LONG)(right - 240), 20, (LONG)(right - 144), 58 };
+    g_hideRect = RECT{ (LONG)(right - 128), 20, (LONG)(right - 32), 58 };
+    auto headerButton = [&](RECT rect, const std::wstring& label) {
+        const D2D1_RECT_F box = D2D1::RectF((float)rect.left, (float)rect.top, (float)rect.right, (float)rect.bottom);
+        if (pill) target->FillRoundedRectangle(D2D1::RoundedRect(box, 11, 11), pill);
+        if (pillRim) target->DrawRoundedRectangle(D2D1::RoundedRect(box, 11, 11), pillRim, 1.0f);
+        DrawText(target, label, g_fmtButton, D2D1::RectF(box.left + 10, box.top + 7, box.right - 8, box.bottom - 3), text ? text : secondary);
+    };
+    headerButton(g_themeRect, T(L"主题", L"主題", L"Theme"));
+    headerButton(g_hideRect, T(L"隐藏", L"隱藏", L"Hide"));
+
+    if (pill) pill->Release();
+    if (pillRim) pillRim->Release();
+    if (dot) dot->Release();
     if (local) local->Release();
     if (text) text->Release();
     if (secondary) secondary->Release();
@@ -756,6 +802,9 @@ static void UpdateMetrics() {
     wchar_t buffer[128];
     if (g_snapshot.remoteAgeSec >= 0 && g_snapshot.remoteFresh) {
         std::swprintf(buffer, 128, T(L"DGX 在线 · %.0f 秒前", L"DGX 線上 · %.0f 秒前", L"DGX online · %.0f s ago").c_str(), g_snapshot.remoteAgeSec);
+    } else if (!g_snapshot.remoteError.empty()) {
+        const std::wstring message = T(L"DGX 连接失败 · ", L"DGX 連線失敗 · ", L"DGX connection failed · ") + g_snapshot.remoteError.substr(0, 90);
+        std::swprintf(buffer, 128, L"%s", message.c_str());
     } else {
         std::swprintf(buffer, 128, L"%s", T(L"DGX 离线", L"DGX 離線", L"DGX offline").c_str());
     }
@@ -1050,7 +1099,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
         }
         // Header buttons.
-        POINT client{ x, y };
+        const float headerScale = g_scale > 0 ? g_scale : 1.0f;
+        POINT client{ (LONG)(x / headerScale), (LONG)(y / headerScale) };
         if (!IsDesktopMode()) {
             if (PtInRect(&g_hideRect, client)) { ShowPanel(false); return 0; }
             if (PtInRect(&g_themeRect, client)) {

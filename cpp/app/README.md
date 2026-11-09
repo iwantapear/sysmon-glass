@@ -30,6 +30,8 @@ with the PowerShell build: `%APPDATA%\SysMon.Glass\sysmon.json` or
   dialog, right-click menus, tray icon, scrollable card view.
 - Interface-language selection (简体 / 繁體 / English), per-user login startup,
   and 1/2/3/5-second refresh-rate selection.
+- Text metrics drive value/unit placement; detail text is excluded from the
+  sparkline lane. Remote failures show the actual SSH error in the status pill.
 - Remote-host editor with host-key trust, probe deployment and connection test
   against any IP/hostname supported by the system OpenSSH client.
 - Unified editing toolbar (mode, scale, layer, Done), scale/preset menu and a
