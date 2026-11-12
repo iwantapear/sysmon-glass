@@ -1,4 +1,5 @@
-﻿$ErrorActionPreference='Continue'
+﻿param([string]$ProcessName = 'sysmon')
+$ErrorActionPreference='Continue'
 Add-Type -AssemblyName System.Drawing, System.Windows.Forms
 Add-Type -TypeDefinition @'
 using System;
@@ -14,7 +15,14 @@ public static class ByTitle {
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
 }
 '@
-$script:targetPid = [uint32](Get-Process sysmon -ErrorAction SilentlyContinue | Select-Object -First 1).Id
+$script:targetPid = [uint32](Get-Process $ProcessName -ErrorAction SilentlyContinue | Select-Object -First 1).Id
+if($ProcessName -eq 'SysMon.Glass'){
+    $launcher = Get-Process SysMon.Glass -ErrorAction SilentlyContinue | Select-Object -First 1
+    if($launcher){
+        $child = Get-CimInstance Win32_Process -Filter ("ParentProcessId="+$launcher.Id) | Where-Object Name -eq 'pwsh.exe' | Select-Object -First 1
+        if($child){ $script:targetPid = [uint32]$child.ProcessId }
+    }
+}
 $script:found = [IntPtr]::Zero
 $callback = [ByTitle+EnumProc]{
     param($h,$p)

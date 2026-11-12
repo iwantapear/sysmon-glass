@@ -118,6 +118,7 @@ static IDWriteTextFormat* g_fmtValue = nullptr;
 static IDWriteTextFormat* g_fmtUnit = nullptr;
 static IDWriteTextFormat* g_fmtSmall = nullptr;
 static IDWriteTextFormat* g_fmtStats = nullptr;
+static IDWriteTextFormat* g_fmtDetail = nullptr;
 static IDWriteTextFormat* g_fmtHeader = nullptr;
 static IDWriteTextFormat* g_fmtEyebrow = nullptr;
 static IDWriteTextFormat* g_fmtButton = nullptr;
@@ -181,6 +182,8 @@ static int PanelBaseHeight(bool desktop) { return (desktop ? 700 : 900) + 200; }
 static void ComputeGeometry(RECT work, double requestedWidth, POINT position, bool desktop,
                             int& outWidth, int& outHeight, POINT& outPosition) {
     double baseHeight = PanelBaseHeight(desktop);
+    const UINT dpi = g_hwnd ? GetDpiForWindow(g_hwnd) : 96;
+    const double pixelsPerDip = dpi > 0 ? (double)dpi / 96.0 : 1.0;
     double factor = 1.0;
     if (requestedWidth > 10) factor = requestedWidth / 1600.0;
     else if (g_settings.preset == "auto") {
@@ -190,7 +193,11 @@ static void ComputeGeometry(RECT work, double requestedWidth, POINT position, bo
     else factor = 2.0;
 
     double width = 1600 * factor;
-    double height = baseHeight * factor;
+    // normalWidthDip/normalHeightDip are device-independent pixels, exactly as
+    // the WPF layout stores them. desktopScale is already a physical ratio.
+    double height = (!desktop && g_settings.normalHeightDip > 10)
+        ? g_settings.normalHeightDip * pixelsPerDip
+        : baseHeight * factor;
     double fit = std::min(1.0, std::min((work.right - work.left - 20) / width, (work.bottom - work.top - 20) / height));
     width = std::max(1.0, std::floor(width * fit));
     height = std::max(1.0, std::floor(height * fit));
@@ -221,7 +228,8 @@ static void ApplyPlacement(bool useCurrentPosition) {
         position = POINT{ (LONG)(desktop ? g_settings.desktopX : g_settings.normalX),
                           (LONG)(desktop ? g_settings.desktopY : g_settings.normalY) };
     }
-    double width = desktop ? (g_settings.desktopScale * 1600.0) : g_settings.normalWidthDip;
+    double width = desktop ? (g_settings.desktopScale * 1600.0)
+                           : g_settings.normalWidthDip * (g_hwnd ? (double)GetDpiForWindow(g_hwnd) / 96.0 : 1.0);
     const POINT monitorPoint{ position.x + 40, position.y + 40 };
     const RECT work = WorkAreaAt(monitorPoint);
     int widthPx = 0, heightPx = 0;
@@ -527,7 +535,7 @@ static void DrawCard(ID2D1RenderTarget* target, const Placement& placement, D2D1
         DrawText(target, stats, g_fmtStats, D2D1::RectF(rect.right - 132, rect.top + 52, rect.right - 18, rect.top + 108), secondary);
 
         // Sparkline over the last samples.
-        if (history->second.size() >= 3) {
+        if (history->second.size() >= 3 && CardDetail(card).size() <= 42) {
             const float sparkLeft = rect.right - 150, sparkWidth = 128.0f, sparkTop = rect.top + 128, sparkHeight = 26.0f;
             double high = max, low = min;
             if (high - low < 2) high = low + 2;
@@ -542,9 +550,12 @@ static void DrawCard(ID2D1RenderTarget* target, const Placement& placement, D2D1
         }
     }
 
-    // Detail text stops before the sparkline lane instead of sharing its pixels.
-    DrawText(target, CardDetail(card), g_fmtSmall,
-             D2D1::RectF(rect.left + 22, rect.bottom - 42, rect.right - 164, rect.bottom - 16), secondary);
+    // Long details wrap and take the full width; the sparkline yields to them
+    // instead of truncating drive or sensor information.
+    const std::wstring detail = CardDetail(card);
+    const float detailRight = detail.size() > 42 ? rect.right - 22.0f : rect.right - 164.0f;
+    DrawText(target, detail, g_fmtDetail ? g_fmtDetail : g_fmtSmall,
+             D2D1::RectF(rect.left + 22, rect.bottom - 46, detailRight, rect.bottom - 8), secondary);
     accent->Release();
     textBrush->Release();
     secondary->Release();
@@ -792,11 +803,15 @@ static void CreateFormats(const wchar_t* family) {
             (*out)->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         }
     };
-    make(12.5f, DWRITE_FONT_WEIGHT_BOLD, &g_fmtTitle);
+    // Match the WPF card typography: title/unit/subline sizes are not scaled
+    // down independently of the window's logical scale.
+    make(15.0f, DWRITE_FONT_WEIGHT_BOLD, &g_fmtTitle);
     make(44.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &g_fmtValue);
-    make(14.0f, DWRITE_FONT_WEIGHT_NORMAL, &g_fmtUnit);
-    make(13.0f, DWRITE_FONT_WEIGHT_NORMAL, &g_fmtSmall);
+    make(15.0f, DWRITE_FONT_WEIGHT_NORMAL, &g_fmtUnit);
+    make(14.0f, DWRITE_FONT_WEIGHT_NORMAL, &g_fmtSmall);
     make(11.0f, DWRITE_FONT_WEIGHT_NORMAL, &g_fmtStats);
+    make(12.0f, DWRITE_FONT_WEIGHT_NORMAL, &g_fmtDetail);
+    if (g_fmtDetail) g_fmtDetail->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
     make(30.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &g_fmtHeader);
     make(12.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &g_fmtEyebrow);
     make(13.0f, DWRITE_FONT_WEIGHT_NORMAL, &g_fmtButton);
@@ -1364,7 +1379,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int) {
     if (g_timerId) KillTimer(g_hwnd, g_timerId);
     g_collector.StopRemote();
     if (g_target) g_target->Release();
-    for (IDWriteTextFormat* format : { g_fmtTitle, g_fmtValue, g_fmtUnit, g_fmtSmall, g_fmtStats, g_fmtHeader, g_fmtEyebrow, g_fmtButton })
+    for (IDWriteTextFormat* format : { g_fmtTitle, g_fmtValue, g_fmtUnit, g_fmtSmall, g_fmtStats, g_fmtDetail, g_fmtHeader, g_fmtEyebrow, g_fmtButton })
         if (format) format->Release();
     if (g_dwrite) g_dwrite->Release();
     if (g_d2d) g_d2d->Release();
