@@ -26,10 +26,10 @@ static void UpdateInsightsAlerts() {
 }
 
 static void DrawInsightsRail(ID2D1RenderTarget* target, const theme::Palette& palette) {
-    if (!IsDesktopMode() || !g_settings.insightsRail) return;
-    const float left = 1192.0f, top = 12.0f, width = 300.0f;
-    const float bottom = ContentViewHeight() - 12.0f;
-    const D2D1_RECT_F panel = D2D1::RectF(left, top, left + width, bottom);
+    const D2D1_RECT_F panel = InsightsBounds();
+    if (panel.right <= panel.left) return;
+    const float left = panel.left, top = panel.top, width = panel.right - panel.left;
+    const float bottom = panel.bottom;
     ID2D1SolidColorBrush* face = nullptr;
     ID2D1SolidColorBrush* rim = nullptr;
     ID2D1SolidColorBrush* text = nullptr;

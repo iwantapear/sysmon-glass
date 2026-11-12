@@ -13,21 +13,23 @@ pwsh -NoProfile -File .\build.ps1          # produces sysmon.exe
 pwsh -NoProfile -File .\build.ps1 -Sign    # also signs with the local cert
 ```
 
-The executable is a single file (~800 KB). Configuration remains compatible
+The executable is a single file with the compiler runtime linked statically. Configuration remains compatible
 with the PowerShell build: `%APPDATA%\SysMon.Glass\sysmon.json` or
 `SYSMON_CONFIG_HOME\sysmon.json`.
 
 ## Implemented
 
 - Eleven palettes copied from the WPF build and three material modes.
-- Default 15-card dashboard plus eight optional cards, grouped local/remote
-  sections, detail lines, rolling max/min/mean and sparklines.
+- Default 15-card dashboard plus eight optional cards on the WPF four-column
+  canvas, with detail lines, progress bars, rolling max/min/mean and sparklines.
 - FanCtl state file, NVIDIA sensors, disk/network/memory/CPU sampling and the
   remote Linux probe through the system OpenSSH client.
 - Bottom-layer mode, transparent card regions and UIA desktop icon holes.
 - Normal-mode gradient + DWM-blurred backdrop and foreground activation on show.
-- Rim and blank-chrome dragging, resize grip, card drag/reorder, card-detail
-  dialog, right-click menus, tray icon, scrollable card view.
+- Rim and blank-chrome dragging, resize grip, card drag/reorder, non-modal card-detail
+  popup, right-click menus, tray icon, scrollable card view.
+- The visible dashboard appears on the Windows taskbar, including desktop mode.
+  Hiding the dashboard removes its taskbar entry while keeping the tray icon.
 - Interface-language selection (简体 / 繁體 / English), per-user login startup,
   and 1/2/3/5-second refresh-rate selection.
 - Text metrics drive value/unit placement; detail text is excluded from the
@@ -46,10 +48,9 @@ WPF. Remaining differences are primarily presentation and secondary behavior:
 
 - System metrics aggregate all fixed drives, matching the PowerShell build.
 - The card manager is a native dialog rather than the WPF visual design.
-- Normal and bottom layouts share placement state; legacy WPF slot files may
-  need one drag/reorder to normalize exactly.
-- The insights rail currently remains visible in bottom mode even when cards
-  occupy the right lane; the exact WPF lane-hiding policy is still being aligned.
+- Panel position is shared across layers. Size and scale are saved per mode.
+- Desktop and custom layouts use the WPF four-column slots. The insights rail
+  hides when a card occupies its lane.
 - Linux/macOS remain the separate Avalonia target; this directory is Windows-only.
 
 The PowerShell build is retained as the reference implementation while the

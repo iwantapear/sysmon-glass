@@ -1,2 +1,2 @@
 #include <windows.h>
-1 ICON "icon.ico"
+APPICON ICON "icon.ico"
