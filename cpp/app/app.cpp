@@ -122,6 +122,7 @@ static IDWriteTextFormat* g_fmtValue = nullptr;
 static IDWriteTextFormat* g_fmtUnit = nullptr;
 static IDWriteTextFormat* g_fmtSmall = nullptr;
 static IDWriteTextFormat* g_fmtStats = nullptr;
+static IDWriteTextFormat* g_fmtStatLabel = nullptr;
 static IDWriteTextFormat* g_fmtDetail = nullptr;
 static IDWriteTextFormat* g_fmtCardSub = nullptr;
 static IDWriteTextFormat* g_fmtHeader = nullptr;
@@ -402,7 +403,7 @@ static void DrawReading(ID2D1RenderTarget* target, const CardReading& reading,
     D2D1_MATRIX_3X2_F transform{};
     target->GetTransform(&transform);
     target->SetTransform(D2D1::Matrix3x2F::Scale(scale, 1.0f, D2D1::Point2F(left, top)) * transform);
-    DrawText(target, reading.value, g_fmtValue, D2D1::RectF(left, top + 49, left + valueWidth, top + 110), numberBrush);
+    DrawText(target, reading.value, g_fmtValue, D2D1::RectF(left, top + 44, left + valueWidth, top + 110), numberBrush);
     if (!reading.unit.empty()) {
         const float unitLeft = left + valueWidth + gap;
         DrawText(target, reading.unit, g_fmtUnit,
@@ -504,9 +505,9 @@ static void DrawCard(ID2D1RenderTarget* target, const Placement& placement, D2D1
     const D2D1_GRADIENT_STOP rim[] = {
         {0.0f, ToColorF(palette.rim[0])}, {0.5f, ToColorF(palette.rim[1])}, {1.0f, ToColorF(palette.rim[2])}};
     const D2D1_GRADIENT_STOP gloss[] = {
-        {0.0f, ToColorF(WithAlpha(palette.gloss, g_material.gloss / 0.45f))},
+        {0.0f, ToColorF(WithAlpha(palette.gloss, g_material.gloss / 0.58f))},
         {1.0f, ToColorF(palette.gloss & 0x00FFFFFF)}};
-    paintGradient(gloss, 2, D2D1::RectF(rect.left + 1, rect.top + 1, rect.right - 1, rect.top + 58), false);
+    paintGradient(gloss, 2, D2D1::RectF(rect.left + 1, rect.top + 1, rect.right - 1, rect.bottom - 1), false);
     paintGradient(rim, 3, rect, true);
 
     ID2D1SolidColorBrush* accent = nullptr;
@@ -522,9 +523,11 @@ static void DrawCard(ID2D1RenderTarget* target, const Placement& placement, D2D1
         return;
     }
 
-    // Accent dot + title.
     target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(rect.left + 28, rect.top + 27), 4.0f, 4.0f), accent);
-    DrawText(target, Tr(card), g_fmtTitle, D2D1::RectF(rect.left + 42, rect.top + 17, rect.right - 24, rect.top + 44), textBrush);
+    secondary->SetColor(ToColorF(palette.label));
+    DrawText(target, Tr(card), g_fmtTitle,
+             D2D1::RectF(rect.left + 42, rect.top + 15, rect.right - (g_editMode ? 54 : 24), rect.top + 43), secondary);
+    secondary->SetColor(ToColorF(palette.secondary));
 
     const CardReading reading = ReadCard(card);
     const std::string key = card.key;
@@ -532,8 +535,8 @@ static void DrawCard(ID2D1RenderTarget* target, const Placement& placement, D2D1
     const bool hasHistory = history != g_history.end() && !history->second.empty() &&
                             (card.side != 'R' || g_snapshot.remoteFresh);
     double max = 0, min = 0;
-    float statsLeft = rect.right - 18;
-    std::wstring stats;
+    float statsLeft = rect.right - 24;
+    std::wstring stats[3];
     if (hasHistory) {
         max = min = history->second.front();
         double sum = 0;
@@ -543,10 +546,15 @@ static void DrawCard(ID2D1RenderTarget* target, const Placement& placement, D2D1
             sum += sample;
         }
         const double mean = sum / history->second.size();
-        stats = T(L"最大 ", L"最大 ", L"max ") + FormatCardSample(card, max) + L"\n" +
-                T(L"最小 ", L"最小 ", L"min ") + FormatCardSample(card, min) + L"\n" +
-                T(L"均值 ", L"均值 ", L"avg ") + FormatCardSample(card, mean);
-        statsLeft -= std::ceil(MeasureTextWidth(stats, g_fmtStats)) + 2;
+        const std::wstring values[] = {
+            FormatCardSample(card, max), FormatCardSample(card, min), FormatCardSample(card, mean)
+        };
+        float valueWidth = 0;
+        for (int row = 0; row < 3; ++row) {
+            stats[row] = values[row];
+            valueWidth = std::max(valueWidth, MeasureTextWidth(stats[row], g_fmtStats));
+        }
+        statsLeft -= std::ceil(valueWidth) + 42;
     }
 
     const auto temperature = g_snapshot.values.find(card.key);
@@ -554,7 +562,7 @@ static void DrawCard(ID2D1RenderTarget* target, const Placement& placement, D2D1
         if (temperature->second >= 80) textBrush->SetColor(ToColorF(palette.bad));
         else if (temperature->second >= 65) textBrush->SetColor(ToColorF(palette.warn));
     }
-    DrawReading(target, reading, rect.left + 24, rect.top, statsLeft - 10, textBrush, secondary);
+    DrawReading(target, reading, rect.left + 24, rect.top, statsLeft - (hasHistory ? 23 : 0), textBrush, secondary);
     textBrush->SetColor(ToColorF(palette.text));
 
     const auto barValue = card.bar ? g_snapshot.values.find(card.bar) : g_snapshot.values.end();
@@ -562,19 +570,34 @@ static void DrawCard(ID2D1RenderTarget* target, const Placement& placement, D2D1
     if (hasBar) {
         const float left = rect.left + 24, right = rect.right - 24, top = rect.top + 127;
         secondary->SetColor(ToColorF(palette.track));
-        target->FillRectangle(D2D1::RectF(left, top, right, top + 4), secondary);
+        target->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(left, top, right, top + 4), 2, 2), secondary);
         secondary->SetColor(ToColorF(palette.secondary));
         const float amount = float(std::clamp(barValue->second, 0.0, 100.0) / 100.0);
-        target->FillRectangle(D2D1::RectF(left, top, left + (right - left) * amount, top + 4), accent);
+        if (amount > 0) target->FillRoundedRectangle(D2D1::RoundedRect(
+            D2D1::RectF(left, top, left + (right - left) * amount, top + 4), 2, 2), accent);
     }
 
     if (hasHistory) {
-        DrawText(target, stats, g_fmtStats,
-                 D2D1::RectF(statsLeft, rect.top + 52, rect.right - 18, rect.top + 108), secondary);
+        const std::wstring labels[] = {
+            T(L"最大", L"最大", L"Max"), T(L"最小", L"最小", L"Min"), T(L"均值", L"均值", L"Avg")
+        };
+        secondary->SetColor(ToColorF(WithAlpha(palette.secondary, 0.23f)));
+        target->DrawLine(D2D1::Point2F(statsLeft - 10, rect.top + 53),
+                         D2D1::Point2F(statsLeft - 10, rect.top + 108), secondary);
+        for (int row = 0; row < 3; ++row) {
+            const float y = rect.top + 49 + row * 20.0f;
+            secondary->SetColor(ToColorF(palette.muted));
+            DrawText(target, labels[row], g_fmtStatLabel,
+                     D2D1::RectF(statsLeft, y, statsLeft + 37, y + 20), secondary);
+            secondary->SetColor(ToColorF(palette.secondary));
+            DrawText(target, stats[row], g_fmtStats,
+                     D2D1::RectF(statsLeft + 40, y, rect.right - 24, y + 20), secondary);
+        }
 
         // Sparkline over the last samples.
         if (history->second.size() >= 3 && !hasBar && g_snapshot.values.contains(key)) {
-            const float sparkLeft = rect.right - 194, sparkWidth = 170.0f, sparkTop = rect.top + 116, sparkHeight = 26.0f;
+            const float sparkLeft = rect.left + 24, sparkWidth = rect.right - rect.left - 48;
+            const float sparkTop = rect.top + 116, sparkHeight = 24;
             double high = max, low = min;
             if (high - low < 2) high = low + 2;
             std::vector<D2D1_POINT_2F> points;
@@ -584,12 +607,12 @@ static void DrawCard(ID2D1RenderTarget* target, const Placement& placement, D2D1
                 float y = sparkTop + 2 + (sparkHeight - 4) - (sparkHeight - 4) * float((samples[i] - low) / (high - low));
                 points.push_back(D2D1::Point2F(x, y));
             }
-            for (size_t i = 1; i < points.size(); ++i) target->DrawLine(points[i - 1], points[i], accent, 2.0f);
+            for (size_t i = 1; i < points.size(); ++i) target->DrawLine(points[i - 1], points[i], accent, 1.6f);
         }
     }
 
     DrawText(target, CardDetail(card), g_fmtCardSub,
-             D2D1::RectF(rect.left + 24, rect.bottom - 39, rect.right - 24, rect.bottom - 13), secondary);
+             D2D1::RectF(rect.left + 24, rect.bottom - 34, rect.right - 24, rect.bottom - 11), secondary);
     if (g_editMode) {
         const auto button = D2D1::RectF(rect.right - 46, rect.top + 8, rect.right - 10, rect.top + 36);
         target->DrawRoundedRectangle(D2D1::RoundedRect(button, 8, 8), secondary);
@@ -602,17 +625,18 @@ static void DrawCard(ID2D1RenderTarget* target, const Placement& placement, D2D1
 }
 
 static void DrawHeader(ID2D1RenderTarget* target, D2D1_SIZE_F size, const theme::Palette& palette) {
-    ID2D1SolidColorBrush* local = nullptr;
     ID2D1SolidColorBrush* text = nullptr;
     ID2D1SolidColorBrush* secondary = nullptr;
-    target->CreateSolidColorBrush(ToColorF(palette.local), &local);
     target->CreateSolidColorBrush(ToColorF(palette.text), &text);
     target->CreateSolidColorBrush(ToColorF(palette.secondary), &secondary);
-    if (local && text) {
-        DrawText(target, T(L"实时监控", L"即時監控", L"SYSTEM / LIVE MONITOR"),
-                 g_fmtEyebrow, D2D1::RectF(48, 18, 640, 38), local);
+    if (text) {
         DrawText(target, T(L"系统状态", L"系統狀態", L"System status"),
-                 g_fmtHeader, D2D1::RectF(46, 36, 640, 82), text);
+                 g_fmtHeader, D2D1::RectF(48, 24, 640, 76), text);
+    }
+    if (secondary) {
+        secondary->SetColor(ToColorF(WithAlpha(palette.secondary, 0.2f)));
+        target->DrawLine(D2D1::Point2F(48, 88), D2D1::Point2F(size.width - 48, 88), secondary);
+        secondary->SetColor(ToColorF(palette.secondary));
     }
     // Status pill and header buttons mirror StatusBorder / ThemeButton / HideButton.
     ID2D1SolidColorBrush* pill = nullptr;
@@ -646,7 +670,6 @@ static void DrawHeader(ID2D1RenderTarget* target, D2D1_SIZE_F size, const theme:
     if (pill) pill->Release();
     if (pillRim) pillRim->Release();
     if (dot) dot->Release();
-    if (local) local->Release();
     if (text) text->Release();
     if (secondary) secondary->Release();
 }
@@ -665,9 +688,9 @@ static void Render() {
     g_target->SetTransform(D2D1::Matrix3x2F::Scale(g_scale, g_scale));
     if (!IsDesktopMode()) {
         const D2D1_GRADIENT_STOP stops[3] = {
-            { 0.0f, ToColorF(palette.bg[0]) },
-            { 0.52f, ToColorF(palette.bg[1]) },
-            { 1.0f, ToColorF(palette.bg[2]) }
+            { 0.0f, ToColorF((palette.bg[0] & 0x00FFFFFFu) | 0xEF000000u) },
+            { 0.52f, ToColorF((palette.bg[1] & 0x00FFFFFFu) | 0xEF000000u) },
+            { 1.0f, ToColorF((palette.bg[2] & 0x00FFFFFFu) | 0xEF000000u) }
         };
         ID2D1GradientStopCollection* collection = nullptr;
         ID2D1LinearGradientBrush* background = nullptr;
@@ -855,11 +878,12 @@ static void CreateFormats(const wchar_t* family) {
     };
     // Match the WPF card typography: title/unit/subline sizes are not scaled
     // down independently of the window's logical scale.
-    make(15.0f, DWRITE_FONT_WEIGHT_NORMAL, &g_fmtTitle);
-    make(44.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &g_fmtValue);
+    make(17.0f, DWRITE_FONT_WEIGHT_MEDIUM, &g_fmtTitle);
+    make(46.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &g_fmtValue);
     make(15.0f, DWRITE_FONT_WEIGHT_NORMAL, &g_fmtUnit);
     make(14.0f, DWRITE_FONT_WEIGHT_NORMAL, &g_fmtSmall);
-    make(11.0f, DWRITE_FONT_WEIGHT_NORMAL, &g_fmtStats);
+    make(13.0f, DWRITE_FONT_WEIGHT_MEDIUM, &g_fmtStats);
+    make(12.0f, DWRITE_FONT_WEIGHT_NORMAL, &g_fmtStatLabel);
     make(16.0f, DWRITE_FONT_WEIGHT_NORMAL, &g_fmtDetail);
     make(14.0f, DWRITE_FONT_WEIGHT_NORMAL, &g_fmtCardSub);
     if (g_fmtCardSub) {
@@ -872,7 +896,7 @@ static void CreateFormats(const wchar_t* family) {
     }
     if (g_fmtStats) g_fmtStats->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
     if (g_fmtDetail) g_fmtDetail->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
-    make(30.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &g_fmtHeader);
+    make(34.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &g_fmtHeader);
     make(12.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &g_fmtEyebrow);
     make(13.0f, DWRITE_FONT_WEIGHT_NORMAL, &g_fmtButton);
     g_dwrite->CreateTextFormat(L"Segoe MDL2 Assets", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
@@ -1616,7 +1640,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int) {
     if (g_timerId) KillTimer(g_hwnd, g_timerId);
     g_collector.StopRemote();
     if (g_target) g_target->Release();
-    for (IDWriteTextFormat* format : { g_fmtTitle, g_fmtValue, g_fmtUnit, g_fmtSmall, g_fmtStats, g_fmtDetail, g_fmtCardSub, g_fmtHeader, g_fmtEyebrow, g_fmtButton, g_fmtIcon })
+    for (IDWriteTextFormat* format : { g_fmtTitle, g_fmtValue, g_fmtUnit, g_fmtSmall, g_fmtStats, g_fmtStatLabel, g_fmtDetail, g_fmtCardSub, g_fmtHeader, g_fmtEyebrow, g_fmtButton, g_fmtIcon })
         if (format) format->Release();
     if (g_dwrite) g_dwrite->Release();
     if (g_d2d) g_d2d->Release();
