@@ -73,8 +73,8 @@ static void DrawInsightsRail(ID2D1RenderTarget* target, const theme::Palette& pa
             double high = history->second[0], low = history->second[0], sum = 0;
             for (double sample : history->second) { high = std::max(high, sample); low = std::min(low, sample); sum += sample; }
             const double mean = sum / history->second.size();
-            line(y, T(L"当前 ", L"目前 ", L"Current ") + FormatNumber(history->second.back(), false) + L"   " + T(L"均值 ", L"均值 ", L"Mean ") + FormatNumber(mean, false)); y += 25;
-            line(y, T(L"最小 ", L"最小 ", L"Min ") + FormatNumber(low, false) + L"   " + T(L"最大 ", L"最大 ", L"Max ") + FormatNumber(high, false)); y += 25;
+            line(y, T(L"当前 ", L"目前 ", L"Current ") + FormatCardSample(*tracked, history->second.back()) + L"   " + T(L"均值 ", L"均值 ", L"Mean ") + FormatCardSample(*tracked, mean)); y += 25;
+            line(y, T(L"最小 ", L"最小 ", L"Min ") + FormatCardSample(*tracked, low) + L"   " + T(L"最大 ", L"最大 ", L"Max ") + FormatCardSample(*tracked, high)); y += 25;
             wchar_t samples[64];
             std::swprintf(samples, 64, T(L"样本 %zu 条", L"樣本 %zu 條", L"%zu samples").c_str(), history->second.size());
             line(y, samples); y += 28;

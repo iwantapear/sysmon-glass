@@ -16,6 +16,7 @@
 #include <dwmapi.h>
 #include <uiautomation.h>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <map>
 #include <algorithm>
@@ -66,8 +67,8 @@ static const CardDef kCards[] = {
     { "dgxNvme", "DGX · NVMe 温度", "DGX · NVMe 溫度", "DGX · NVMe temp",  "°C",     0xFFCBAAFFu, nullptr,   'R', true },
     { "dgxMem",  "DGX · 内存",      "DGX · 記憶體",    "DGX · memory",     "GB",     0xFF8FE9CEu, "dgxMemPct",'R', false },
     { "dgxLoad", "DGX · 负载",      "DGX · 負載",      "DGX · load",       "",       0xFFFFCC97u, nullptr,   'R', false },
-    { "netDown", "本机 · 网络速率 · 下载", "本機 · 網路速率 · 下載", "Local · network down", "KiB/s", 0xFF74DAEBu, nullptr, 'S', false },
-    { "netUp",   "本机 · 网络速率 · 上传", "本機 · 網路速率 · 上傳", "Local · network up",   "KiB/s", 0xFF9BE5B8u, nullptr, 'S', false },
+    { "netDown", "本机 · 网络速率 · 下载", "本機 · 網路速率 · 下載", "Local · network down", "",      0xFF74DAEBu, nullptr, 'S', false },
+    { "netUp",   "本机 · 网络速率 · 上传", "本機 · 網路速率 · 上傳", "Local · network up",   "",      0xFF9BE5B8u, nullptr, 'S', false },
     { "diskPct", "本机 · 磁盘空间 · 已用", "本機 · 磁碟空間 · 已用", "Local · disk used",    "%",     0xFFFFCC97u, "diskPct", 'S', false }
 };
 static const CardDef kOptionalCards[] = {
@@ -347,36 +348,66 @@ static std::wstring FormatNumber(double value, bool temperature) {
     return buffer;
 }
 
-static std::wstring FormatValueForCard(const CardDef& card) {
-    auto it = g_snapshot.values.find(card.key);
-    if (it == g_snapshot.values.end()) return T(L"—", L"—", L"—");
-    const double value = it->second;
-    switch (card.side) {
-    case 'S':
-        if (std::string(card.key) == "netDown" || std::string(card.key) == "netUp") {
-            // Formats KiB/s the way Format-ByteValue does (B/KiB/MiB).
-            double perSecond = value * 1024.0;
-            wchar_t buffer[64];
-            if (perSecond >= 1048576) std::swprintf(buffer, 64, L"%.1f", perSecond / 1048576);
-            else if (perSecond >= 1024) std::swprintf(buffer, 64, L"%.1f", perSecond / 1024);
-            else std::swprintf(buffer, 64, L"%.0f", perSecond);
-            return buffer;
-        }
-        return FormatNumber(value, false);
-    default:
-        return FormatNumber(value, card.temperature);
+struct CardReading {
+    std::wstring value;
+    std::wstring unit;
+
+    std::wstring Text() const {
+        return unit.empty() ? value : value + L" " + unit;
     }
+};
+
+static bool IsNetworkCard(const CardDef& card) {
+    const std::string_view key = card.key;
+    return key == "netDown" || key == "netUp";
 }
 
-static std::wstring FormatUnitForCard(const CardDef& card) {
-    if (std::string(card.key) == "netDown" || std::string(card.key) == "netUp") {
-        auto it = g_snapshot.values.find(card.key);
-        double perSecond = it == g_snapshot.values.end() ? 0 : it->second * 1024.0;
-        if (perSecond >= 1048576) return L"MiB/s";
-        if (perSecond >= 1024) return L"KiB/s";
-        return L"B/s";
+static CardReading FormatNetworkRate(double kibPerSecond) {
+    if (!std::isfinite(kibPerSecond) || kibPerSecond < 0) return {L"—", L""};
+
+    // The collector reports KiB/s. Convert to bytes before choosing decimal units.
+    double rate = kibPerSecond * 1024.0;
+    constexpr const wchar_t* units[] = {L"B/s", L"KB/s", L"MB/s", L"GB/s"};
+    size_t unit = 0;
+    while (rate >= 1000.0 && unit + 1 < std::size(units)) {
+        rate /= 1000.0;
+        ++unit;
     }
-    return metrics::Utf8ToWide(card.unit);
+    wchar_t value[64]{};
+    std::swprintf(value, std::size(value), unit == 0 ? L"%.0f" : L"%.1f", rate);
+    return {value, units[unit]};
+}
+
+static CardReading ReadCard(const CardDef& card) {
+    const auto it = g_snapshot.values.find(card.key);
+    if (IsNetworkCard(card))
+        return it == g_snapshot.values.end() ? CardReading{L"—", L""} : FormatNetworkRate(it->second);
+
+    return {it == g_snapshot.values.end() ? L"—" : FormatNumber(it->second, card.temperature),
+            metrics::Utf8ToWide(card.unit)};
+}
+
+static std::wstring FormatCardSample(const CardDef& card, double sample) {
+    return IsNetworkCard(card) ? FormatNetworkRate(sample).Text() : FormatNumber(sample, false);
+}
+
+static void DrawReading(ID2D1RenderTarget* target, const CardReading& reading,
+                        float left, float top, float right, ID2D1Brush* numberBrush, ID2D1Brush* unitBrush) {
+    constexpr float gap = 8;
+    const float valueWidth = std::ceil(MeasureTextWidth(reading.value, g_fmtValue)) + 2;
+    const float unitWidth = std::ceil(MeasureTextWidth(reading.unit, g_fmtUnit)) + 2;
+    const float width = valueWidth + (reading.unit.empty() ? 0 : gap + unitWidth);
+    const float scale = std::clamp((right - left) / width, 0.0f, 1.0f);
+    D2D1_MATRIX_3X2_F transform{};
+    target->GetTransform(&transform);
+    target->SetTransform(D2D1::Matrix3x2F::Scale(scale, 1.0f, D2D1::Point2F(left, top)) * transform);
+    DrawText(target, reading.value, g_fmtValue, D2D1::RectF(left, top + 49, left + valueWidth, top + 110), numberBrush);
+    if (!reading.unit.empty()) {
+        const float unitLeft = left + valueWidth + gap;
+        DrawText(target, reading.unit, g_fmtUnit,
+                 D2D1::RectF(unitLeft, top + 78, unitLeft + unitWidth, top + 108), unitBrush);
+    }
+    target->SetTransform(transform);
 }
 
 static std::wstring CardDetail(const CardDef& card) {
@@ -399,8 +430,8 @@ static std::wstring CardDetail(const CardDef& card) {
     if (key == "dgxNvme") return T(L"本地盘", L"本機磁碟", L"local drive");
     if (key == "dgxMem") return T(L"共 ", L"共 ", L"of ") + value("dgxMemTot") + L" GB";
     if (key == "dgxLoad") return T(L"已运行 ", L"已執行 ", L"up ") + value("dgxUp") + T(L" 小时", L" 小時", L" h");
-    if (key == "netDown") return T(L"上传 ", L"上傳 ", L"up ") + value("netUp");
-    if (key == "netUp") return T(L"下载 ", L"下載 ", L"down ") + value("netDown");
+    if (key == "netDown") return T(L"上传 ", L"上傳 ", L"up ") + ReadCard(*FindCard("netUp")).Text();
+    if (key == "netUp") return T(L"下载 ", L"下載 ", L"down ") + ReadCard(*FindCard("netDown")).Text();
     if (key == "diskPct") {
         const std::wstring summary = value("diskUsed") + L" / " + value("diskTotal") + L" GB";
         return g_snapshot.diskDetail.empty() ? summary : summary + L" · " + g_snapshot.diskDetail;
@@ -494,25 +525,37 @@ static void DrawCard(ID2D1RenderTarget* target, const Placement& placement, D2D1
     target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(rect.left + 28, rect.top + 27), 4.0f, 4.0f), accent);
     DrawText(target, Tr(card), g_fmtTitle, D2D1::RectF(rect.left + 42, rect.top + 17, rect.right - 24, rect.top + 44), textBrush);
 
-    // Value + unit.
-    const std::wstring value = FormatValueForCard(card);
+    const CardReading reading = ReadCard(card);
+    const std::string key = card.key;
+    const auto history = g_history.find(card.key);
+    const bool hasHistory = history != g_history.end() && !history->second.empty() &&
+                            (card.side != 'R' || g_snapshot.remoteFresh);
+    double max = 0, min = 0;
+    float statsLeft = rect.right - 18;
+    std::wstring stats;
+    if (hasHistory) {
+        max = min = history->second.front();
+        double sum = 0;
+        for (double sample : history->second) {
+            max = std::max(max, sample);
+            min = std::min(min, sample);
+            sum += sample;
+        }
+        const double mean = sum / history->second.size();
+        stats = T(L"最大 ", L"最大 ", L"max ") + FormatCardSample(card, max) + L"\n" +
+                T(L"最小 ", L"最小 ", L"min ") + FormatCardSample(card, min) + L"\n" +
+                T(L"均值 ", L"均值 ", L"avg ") + FormatCardSample(card, mean);
+        statsLeft -= std::ceil(MeasureTextWidth(stats, g_fmtStats)) + 2;
+    }
+
     const auto temperature = g_snapshot.values.find(card.key);
     if (card.temperature && temperature != g_snapshot.values.end()) {
         if (temperature->second >= 80) textBrush->SetColor(ToColorF(palette.bad));
         else if (temperature->second >= 65) textBrush->SetColor(ToColorF(palette.warn));
     }
-    DrawText(target, value, g_fmtValue, D2D1::RectF(rect.left + 24, rect.top + 49, rect.right - 24, rect.top + 110), textBrush);
+    DrawReading(target, reading, rect.left + 24, rect.top, statsLeft - 10, textBrush, secondary);
     textBrush->SetColor(ToColorF(palette.text));
-    // Place the unit after the measured value width, not at a fixed fraction of
-    // the value box (which overlapped long values such as 2,066).
-    const float measured = MeasureTextWidth(value, g_fmtValue);
-    // Draw the unit directly after the measured number and let it use the rest
-    // of the card. A second clamp against the stats lane hid °C and RPM.
-    const float unitLeft = rect.left + 24 + measured + 8.0f;
-    DrawText(target, FormatUnitForCard(card), g_fmtUnit,
-             D2D1::RectF(unitLeft, rect.top + 78, rect.right - 18.0f, rect.top + 108), secondary);
 
-    const std::string key = card.key;
     const auto barValue = card.bar ? g_snapshot.values.find(card.bar) : g_snapshot.values.end();
     const bool hasBar = barValue != g_snapshot.values.end() && g_snapshot.values.contains(key);
     if (hasBar) {
@@ -524,16 +567,9 @@ static void DrawCard(ID2D1RenderTarget* target, const Placement& placement, D2D1
         target->FillRectangle(D2D1::RectF(left, top, left + (right - left) * amount, top + 4), accent);
     }
 
-    // Rolling max/min/mean on the right.
-    auto history = g_history.find(card.key);
-    if (history != g_history.end() && !history->second.empty() && (card.side != 'R' || g_snapshot.remoteFresh)) {
-        double max = history->second[0], min = history->second[0], sum = 0;
-        for (double sample : history->second) { max = std::max(max, sample); min = std::min(min, sample); sum += sample; }
-        const double mean = sum / double(history->second.size());
-        const std::wstring stats = T(L"最大 ", L"最大 ", L"max ") + FormatNumber(max, false) + L"\n" +
-                                   T(L"最小 ", L"最小 ", L"min ") + FormatNumber(min, false) + L"\n" +
-                                   T(L"均值 ", L"均值 ", L"avg ") + FormatNumber(mean, false);
-        DrawText(target, stats, g_fmtStats, D2D1::RectF(rect.right - 132, rect.top + 52, rect.right - 18, rect.top + 108), secondary);
+    if (hasHistory) {
+        DrawText(target, stats, g_fmtStats,
+                 D2D1::RectF(statsLeft, rect.top + 52, rect.right - 18, rect.top + 108), secondary);
 
         // Sparkline over the last samples.
         if (history->second.size() >= 3 && !hasBar && g_snapshot.values.contains(key)) {

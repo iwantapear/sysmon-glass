@@ -79,7 +79,7 @@ static LRESULT CALLBACK DetailProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                     D2D1::RectF(0.5f, 0.5f, size.width - 0.5f, size.height - 0.5f), 14, 14), brush);
                 brush->SetColor(ToColorF(palette.text));
                 DrawText(target, Tr(card), g_fmtTitle, D2D1::RectF(20, 14, size.width - 20, 37), brush);
-                DrawText(target, FormatValueForCard(card) + L" " + FormatUnitForCard(card), g_fmtSmall,
+                DrawText(target, ReadCard(card).Text(), g_fmtSmall,
                          D2D1::RectF(20, 39, size.width - 20, 62), brush);
                 DrawText(target, CardDetail(card), g_fmtDetail,
                          D2D1::RectF(20, 65, size.width - 20, 111), brush);
