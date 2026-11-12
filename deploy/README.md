@@ -1,4 +1,4 @@
-﻿# SysMon Glass deployment
+# SysMon Glass deployment
 
 This directory contains packaging and installation tooling only. Application source remains under `portable/` for the cross-platform Avalonia target; the current WPF implementation lives at the repository root and packages from `deploy/wpf-release/`. Published binaries are generated under `deploy/artifacts/` and are not checked into source.
 

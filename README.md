@@ -1,4 +1,4 @@
-﻿# SysMon Glass
+# SysMon Glass
 
 [![linux](https://github.com/iwantapear/sysmon-glass/actions/workflows/linux.yml/badge.svg)](https://github.com/iwantapear/sysmon-glass/actions/workflows/linux.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)

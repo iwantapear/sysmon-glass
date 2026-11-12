@@ -1,4 +1,4 @@
-﻿param([string]$ProcessName = 'sysmon')
+param([string]$ProcessName = 'sysmon')
 $ErrorActionPreference='Continue'
 Add-Type -AssemblyName System.Drawing, System.Windows.Forms
 Add-Type -TypeDefinition @'

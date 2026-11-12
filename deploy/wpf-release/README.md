@@ -1,4 +1,4 @@
-﻿# SysMon Glass current WPF release
+# SysMon Glass current WPF release
 
 Build from `<repo>`:
 

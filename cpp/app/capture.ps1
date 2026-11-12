@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference='Continue'
+$ErrorActionPreference='Continue'
 Add-Type -AssemblyName System.Drawing, System.Windows.Forms
 Add-Type -TypeDefinition @'
 using System;
