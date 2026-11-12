@@ -1,0 +1,3 @@
+#include <windows.h>
+APPICON ICON "../../cpp/app/icon.ico"
+SYSMON_PAYLOAD RCDATA "../../cpp/app/sysmon.exe"

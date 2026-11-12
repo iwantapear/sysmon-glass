@@ -16,16 +16,20 @@
 #include <dwmapi.h>
 #include <uiautomation.h>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <map>
 #include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <cstdio>
 #include <memory>
+#include <tuple>
 
 #include "json.h"
 #include "theme.h"
 #include "config.h"
+#include "layout.h"
 #include "metrics.h"
 
 #pragma comment(lib, "d2d1.lib")
@@ -63,8 +67,8 @@ static const CardDef kCards[] = {
     { "dgxNvme", "DGX · NVMe 温度", "DGX · NVMe 溫度", "DGX · NVMe temp",  "°C",     0xFFCBAAFFu, nullptr,   'R', true },
     { "dgxMem",  "DGX · 内存",      "DGX · 記憶體",    "DGX · memory",     "GB",     0xFF8FE9CEu, "dgxMemPct",'R', false },
     { "dgxLoad", "DGX · 负载",      "DGX · 負載",      "DGX · load",       "",       0xFFFFCC97u, nullptr,   'R', false },
-    { "netDown", "本机 · 网络速率 · 下载", "本機 · 網路速率 · 下載", "Local · network down", "KiB/s", 0xFF74DAEBu, nullptr, 'S', false },
-    { "netUp",   "本机 · 网络速率 · 上传", "本機 · 網路速率 · 上傳", "Local · network up",   "KiB/s", 0xFF9BE5B8u, nullptr, 'S', false },
+    { "netDown", "本机 · 网络速率 · 下载", "本機 · 網路速率 · 下載", "Local · network down", "",      0xFF74DAEBu, nullptr, 'S', false },
+    { "netUp",   "本机 · 网络速率 · 上传", "本機 · 網路速率 · 上傳", "Local · network up",   "",      0xFF9BE5B8u, nullptr, 'S', false },
     { "diskPct", "本机 · 磁盘空间 · 已用", "本機 · 磁碟空間 · 已用", "Local · disk used",    "%",     0xFFFFCC97u, "diskPct", 'S', false }
 };
 static const CardDef kOptionalCards[] = {
@@ -118,10 +122,13 @@ static IDWriteTextFormat* g_fmtValue = nullptr;
 static IDWriteTextFormat* g_fmtUnit = nullptr;
 static IDWriteTextFormat* g_fmtSmall = nullptr;
 static IDWriteTextFormat* g_fmtStats = nullptr;
+static IDWriteTextFormat* g_fmtStatLabel = nullptr;
 static IDWriteTextFormat* g_fmtDetail = nullptr;
+static IDWriteTextFormat* g_fmtCardSub = nullptr;
 static IDWriteTextFormat* g_fmtHeader = nullptr;
 static IDWriteTextFormat* g_fmtEyebrow = nullptr;
 static IDWriteTextFormat* g_fmtButton = nullptr;
+static IDWriteTextFormat* g_fmtIcon = nullptr;
 
 static cfg::Settings g_settings;
 static std::vector<theme::Palette> g_palettes;
@@ -131,21 +138,22 @@ static metrics::Snapshot g_snapshot;
 static std::map<std::string, std::vector<double>> g_history;
 static bool g_editMode = false;
 static bool g_panelAdjusting = false;
-static bool g_showRail = true;
-static int g_hoverControl = 0;          // 0 none, 1 theme, 2 hide, 3 done, 4 scale-, 5 scale+, 6 mode, 7 layer
 static RECT g_themeRect{}, g_hideRect{}, g_doneRect{}, g_scaleUpRect{}, g_scaleDownRect{}, g_modeRect{}, g_layerRect{};
 static NOTIFYICONDATAW g_tray{};
-static HMENU g_trayMenu = nullptr;
 static bool g_dragging = false;
+static bool g_resizing = false;
+static bool g_resizeChanged = false;
 static POINT g_dragOrigin{};
 static RECT g_dragWindow{};
-static int g_dragCard = -1;
+static std::string g_dragCard;
+static POINT g_dragStart{};
 static POINT g_dragCardOffset{};
+static cfg::Slot g_dragTarget{};
+static bool g_cardMoved = false;
 static bool g_exitRequested = false;
 static UINT g_timerId = 0;
 static float g_scale = 1.0f;            // DIP->physical factor for the panel
 static std::wstring g_statusText;
-static bool g_regionDirty = true;
 static std::string g_trackedKey = "cpu";
 struct InsightAlert { std::string key; double value; int level; SYSTEMTIME at; };
 static std::vector<InsightAlert> g_alerts;
@@ -168,16 +176,10 @@ static const theme::Palette& Pal() { return theme::Get(g_palettes, g_settings.th
 
 // ---------------------------------------------------------------- layout
 struct Placement { const CardDef* card; int row, column, span; float x = 0, y = 0, w = 0, h = 0; };
-// Section headers exactly as Dashboard.xaml labels them.
-static const wchar_t* kLocalEyebrowZh = L"LOCAL MACHINE";
-static const wchar_t* kLocalTitleZh = L"本机 · i9-13900KF + RTX 4070";
-static const wchar_t* kLocalTitleEn = L"Local · i9-13900KF + RTX 4070";
-static const wchar_t* kRemoteEyebrowZh = L"REMOTE COMPUTE";
-static const wchar_t* kRemoteTitleZh = L"DGX Spark · GB10";
-static float g_sectionTop = 0.0f;
+
 static std::vector<Placement> g_placements;
 
-static int PanelBaseHeight(bool desktop) { return (desktop ? 700 : 900) + 200; }
+static int PanelBaseHeight(bool desktop) { return desktop || g_editMode ? 900 : 1040; }
 
 static void ComputeGeometry(RECT work, double requestedWidth, POINT position, bool desktop,
                             int& outWidth, int& outHeight, POINT& outPosition) {
@@ -228,8 +230,9 @@ static void ApplyPlacement(bool useCurrentPosition) {
         position = POINT{ (LONG)(desktop ? g_settings.desktopX : g_settings.normalX),
                           (LONG)(desktop ? g_settings.desktopY : g_settings.normalY) };
     }
-    double width = desktop ? (g_settings.desktopScale * 1600.0)
-                           : g_settings.normalWidthDip * (g_hwnd ? (double)GetDpiForWindow(g_hwnd) / 96.0 : 1.0);
+    const double dpiScale = GetDpiForWindow(g_hwnd) / 96.0;
+    const double width = desktop ? g_settings.desktopScale * 1600.0 * dpiScale
+                                 : g_settings.normalWidthDip * dpiScale;
     const POINT monitorPoint{ position.x + 40, position.y + 40 };
     const RECT work = WorkAreaAt(monitorPoint);
     int widthPx = 0, heightPx = 0;
@@ -239,7 +242,6 @@ static void ApplyPlacement(bool useCurrentPosition) {
     // maps exactly onto the client area, including fractional-DPI displays.
     g_scale = float(widthPx) / 1600.0f;
     SetWindowPos(g_hwnd, nullptr, topLeft.x, topLeft.y, widthPx, heightPx, SWP_NOZORDER | SWP_NOACTIVATE);
-    g_regionDirty = true;
 }
 
 // Layout constants live in the 1600-wide logical space (the same reference the WPF
@@ -247,102 +249,85 @@ static void ApplyPlacement(bool useCurrentPosition) {
 static const float kLogicalWidth = 1600.0f;
 static const float kCardWidth = 376.0f;
 static const float kCellHeight = 200.0f;
-static const float kContentLeft = 48.0f;
+static constexpr float kContentLeft = 48.0f;
 static const float kHeaderHeight = 94.0f;
 static const float kFooterHeight = 46.0f;
 static float g_scrollOffset = 0.0f;
 
-static float ContentViewTop() { return IsDesktopMode() ? 0.0f : kHeaderHeight + 16.0f; }
+static bool ShowsChrome() { return !IsDesktopMode() && !g_editMode; }
+static float ContentViewTop() { return (ShowsChrome() ? kHeaderHeight : 0.0f) + 20.0f; }
 static float LogicalHeight() {
     const float scale = g_scale > 0 ? g_scale : 1.0f;
     return (g_target ? g_target->GetSize().height : 900.0f) / scale;
 }
 static float ContentViewHeight() {
-    return LogicalHeight() - ContentViewTop() - (IsDesktopMode() ? 0.0f : kFooterHeight);
+    return std::max(0.0f, LogicalHeight() - ContentViewTop() - 20.0f - (ShowsChrome() ? kFooterHeight : 0.0f));
 }
 
-// Places cards the way Dashboard.xaml does: two sections side by side (each two
-// card columns wide, 28 px gutter) with their own eyebrow + title, and the system
-// cards in a row underneath. Geometry is absolute in the 1600-wide logical space.
-static void BuildPlacements(int /*columns*/) {
+// The WPF canvas uses the same four-column slots in all window modes.
+static int CardSpan(const std::string& key) {
+    auto shape = g_settings.cardShapes.find(key);
+    return shape != g_settings.cardShapes.end() && shape->second == "long" ? 2 : 1;
+}
+
+static std::vector<layout::Card> ActiveCards() {
+    std::vector<layout::Card> cards;
+    const auto enabled = g_settings.enabledCards.empty() ? DefaultCardKeys() : g_settings.enabledCards;
+    auto add = [&](const std::string& key) {
+        if (!FindCard(key) || std::ranges::find(enabled, key) == enabled.end() ||
+            std::ranges::any_of(cards, [&](const auto& card) { return card.key == key; })) return;
+        cards.push_back({key, CardSpan(key)});
+    };
+    for (const auto& key : g_settings.cardOrder) add(key);
+    for (const auto& key : enabled) add(key);
+    return cards;
+}
+
+static D2D1_RECT_F ResizeGripBounds() {
+    if (IsDesktopMode() && !g_panelAdjusting) return {};
+    return D2D1::RectF(kLogicalWidth - 36, LogicalHeight() - 32, kLogicalWidth - 6, LogicalHeight() - 2);
+}
+
+static void BuildPlacements() {
     g_placements.clear();
-    std::vector<std::string> order = g_settings.cardOrder;
-    for (const auto& key : DefaultCardKeys()) {
-        if (std::find(order.begin(), order.end(), key) == order.end()) order.push_back(key);
+    const auto cards = ActiveCards();
+    const auto slots = layout::Pack(cards, g_settings.cardSlots);
+    for (const auto& card : cards) {
+        const auto [row, column] = slots.at(card.key);
+        g_placements.push_back({FindCard(card.key), row, column, card.span,
+            kContentLeft + column * kCardWidth, ContentViewTop() + row * kCellHeight,
+            card.span * kCardWidth - 18.0f, kCellHeight - 16.0f});
     }
-    if (!g_settings.enabledCards.empty()) {
-        order.erase(std::remove_if(order.begin(), order.end(), [&](const std::string& key) {
-            return std::find(g_settings.enabledCards.begin(), g_settings.enabledCards.end(), key) == g_settings.enabledCards.end();
-        }), order.end());
+}
+
+static float MaximumScroll() {
+    float contentBottom = ContentViewTop();
+    for (const auto& card : g_placements)
+        contentBottom = std::max(contentBottom, card.y + card.h + 16.0f);
+    if (g_editMode) {
+        const float extraRow = g_settings.freePlacement
+            ? ContentViewTop() + layout::kRows * kCellHeight : contentBottom + kCellHeight;
+        contentBottom = std::max(contentBottom, extraRow);
     }
-    const bool desktop = IsDesktopMode();
-    const float gutter = 28.0f;
-    const float halfWidth = (1504.0f - gutter) / 2.0f;      // 1504 = 1600 - 2*48
-    const float columnWidth = halfWidth / 2.0f;
-    const float headerBand = desktop ? 0.0f : 53.0f;        // LocalSection title row
+    return std::max(0.0f, contentBottom - ContentViewTop() - ContentViewHeight());
+}
+
+static D2D1_RECT_F InsightsBounds() {
+    constexpr float left = kContentLeft + 1504.0f - 312.0f;
+    if (!IsDesktopMode() || !g_settings.insightsRail || ContentViewHeight() <= 24.0f)
+        return {};
+    for (const auto& card : g_placements) {
+        if (card.x + card.span * kCardWidth > left - 8.0f) return {};
+    }
     const float top = ContentViewTop();
-    g_sectionTop = top;
-
-    // Desktop mode keeps the free slot grid (cardSlots) — that is what dragging edits.
-    if (desktop && !g_settings.cardSlots.empty()) {
-        for (const auto& key : order) {
-            const CardDef* card = FindCard(key);
-            if (!card) continue;
-            auto it = g_settings.cardSlots.find(key);
-            if (it == g_settings.cardSlots.end()) continue;
-            const int span = (g_settings.cardShapes.count(card->key) && g_settings.cardShapes[card->key] == "long") ? 2 : 1;
-            Placement placement{ card, it->second.row, it->second.column, span };
-            placement.x = 48.0f + it->second.column * 376.0f;
-            placement.y = it->second.row * 200.0f;
-            placement.w = span * 376.0f - 16.0f;
-            placement.h = 200.0f - 16.0f;
-            g_placements.push_back(placement);
-        }
-        return;
-    }
-
-    int leftRow = 0, leftCol = 0, rightRow = 0, rightCol = 0, sysRow = 0, sysCount = 0;
-    float leftBottom = 0, rightBottom = 0;
-    for (const auto& key : order) {
-        const CardDef* card = FindCard(key);
-        if (!card) continue;
-        int span = (g_settings.cardShapes.count(card->key) && g_settings.cardShapes[card->key] == "long") ? 2 : 1;
-        span = std::min(span, 2);
-        Placement placement{ card, 0, 0, span };
-        placement.w = span * columnWidth - 16.0f;
-        placement.h = 200.0f - 16.0f;
-        if (card->side == 'L') {
-            if (leftCol + span > 2) { leftCol = 0; ++leftRow; }
-            placement.row = leftRow;
-            placement.column = leftCol;
-            placement.x = 48.0f + leftCol * columnWidth;
-            placement.y = top + headerBand + leftRow * 200.0f;
-            leftCol += span;
-            leftBottom = std::max(leftBottom, placement.y + 200.0f);
-        } else if (card->side == 'R') {
-            if (rightCol + span > 2) { rightCol = 0; ++rightRow; }
-            placement.row = rightRow;
-            placement.column = rightCol;
-            placement.x = 48.0f + halfWidth + gutter + rightCol * columnWidth;
-            placement.y = top + headerBand + rightRow * 200.0f;
-            rightCol += span;
-            rightBottom = std::max(rightBottom, placement.y + 200.0f);
-        } else {
-            if (sysCount + 1 > 4) { sysCount = 0; ++sysRow; }
-            placement.row = sysRow;
-            placement.column = sysCount;
-            placement.x = 48.0f + sysCount * 376.0f;
-            placement.y = std::max(leftBottom, rightBottom) + 16.0f + sysRow * 200.0f;
-            ++sysCount;
-        }
-        g_placements.push_back(placement);
-    }
+    return D2D1::RectF(left, top, left + 300.0f, top + ContentViewHeight() - 8.0f);
 }
 
 // ---------------------------------------------------------------- text helpers
 static void DrawText(ID2D1RenderTarget* target, const std::wstring& text, IDWriteTextFormat* format,
                      D2D1_RECT_F box, ID2D1Brush* brush) {
-    target->DrawTextW(text.c_str(), (UINT32)text.size(), format, box, brush);
+    if (format && box.right > box.left && box.bottom > box.top)
+        target->DrawTextW(text.c_str(), (UINT32)text.size(), format, box, brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
 static float MeasureTextWidth(const std::wstring& text, IDWriteTextFormat* format) {
@@ -356,52 +341,84 @@ static float MeasureTextWidth(const std::wstring& text, IDWriteTextFormat* forma
     return metrics.width;
 }
 
-static std::wstring FormatNumber(double value, bool temperature) {
+static std::wstring FormatNumber(double value) {
     wchar_t buffer[64];
     if (std::fabs(value) < 10) std::swprintf(buffer, 64, L"%.1f", value);
     else std::swprintf(buffer, 64, L"%.0f", value);
-    (void)temperature;
     return buffer;
 }
 
-static std::wstring FormatValueForCard(const CardDef& card) {
-    auto it = g_snapshot.values.find(card.key);
-    if (it == g_snapshot.values.end()) return T(L"—", L"—", L"—");
-    const double value = it->second;
-    switch (card.side) {
-    case 'S':
-        if (std::string(card.key) == "netDown" || std::string(card.key) == "netUp") {
-            // Formats KiB/s the way Format-ByteValue does (B/KiB/MiB).
-            double perSecond = value * 1024.0;
-            wchar_t buffer[64];
-            if (perSecond >= 1048576) std::swprintf(buffer, 64, L"%.1f", perSecond / 1048576);
-            else if (perSecond >= 1024) std::swprintf(buffer, 64, L"%.1f", perSecond / 1024);
-            else std::swprintf(buffer, 64, L"%.0f", perSecond);
-            return buffer;
-        }
-        return FormatNumber(value, false);
-    default:
-        return FormatNumber(value, card.temperature);
+struct CardReading {
+    std::wstring value;
+    std::wstring unit;
+
+    std::wstring Text() const {
+        return unit.empty() ? value : value + L" " + unit;
     }
+};
+
+static bool IsNetworkCard(const CardDef& card) {
+    const std::string_view key = card.key;
+    return key == "netDown" || key == "netUp";
 }
 
-static std::wstring FormatUnitForCard(const CardDef& card) {
-    if (std::string(card.key) == "netDown" || std::string(card.key) == "netUp") {
-        auto it = g_snapshot.values.find(card.key);
-        double perSecond = it == g_snapshot.values.end() ? 0 : it->second * 1024.0;
-        if (perSecond >= 1048576) return L"MiB/s";
-        if (perSecond >= 1024) return L"KiB/s";
-        return L"B/s";
+static CardReading FormatNetworkRate(double kibPerSecond) {
+    if (!std::isfinite(kibPerSecond) || kibPerSecond < 0) return {L"—", L""};
+
+    // The collector reports KiB/s. Convert to bytes before choosing decimal units.
+    double rate = kibPerSecond * 1024.0;
+    constexpr const wchar_t* units[] = {L"B/s", L"KB/s", L"MB/s", L"GB/s"};
+    size_t unit = 0;
+    while (rate >= 1000.0 && unit + 1 < std::size(units)) {
+        rate /= 1000.0;
+        ++unit;
     }
-    return metrics::Utf8ToWide(card.unit);
+    wchar_t value[64]{};
+    std::swprintf(value, std::size(value), unit == 0 ? L"%.0f" : L"%.1f", rate);
+    return {value, units[unit]};
+}
+
+static CardReading FormatCardReading(const CardDef& card, double value) {
+    if (IsNetworkCard(card)) return FormatNetworkRate(value);
+    return {FormatNumber(value), metrics::Utf8ToWide(card.unit)};
+}
+
+static CardReading ReadCard(const CardDef& card) {
+    const auto it = g_snapshot.values.find(card.key);
+    if (it != g_snapshot.values.end()) return FormatCardReading(card, it->second);
+    return {L"—", metrics::Utf8ToWide(card.unit)};
+}
+
+static std::wstring FormatCardSample(const CardDef& card, double sample) {
+    return FormatCardReading(card, sample).Text();
+}
+
+static void DrawReading(ID2D1RenderTarget* target, const CardReading& reading,
+                        float left, float top, float right, ID2D1Brush* numberBrush, ID2D1Brush* unitBrush) {
+    constexpr float gap = 8;
+    const float valueWidth = std::ceil(MeasureTextWidth(reading.value, g_fmtValue)) + 2;
+    const float unitWidth = std::ceil(MeasureTextWidth(reading.unit, g_fmtUnit)) + 2;
+    const float width = valueWidth + (reading.unit.empty() ? 0 : gap + unitWidth);
+    const float scale = std::clamp((right - left) / width, 0.0f, 1.0f);
+    D2D1_MATRIX_3X2_F transform{};
+    target->GetTransform(&transform);
+    target->SetTransform(D2D1::Matrix3x2F::Scale(scale, 1.0f, D2D1::Point2F(left, top)) * transform);
+    DrawText(target, reading.value, g_fmtValue, D2D1::RectF(left, top + 44, left + valueWidth, top + 110), numberBrush);
+    if (!reading.unit.empty()) {
+        const float unitLeft = left + valueWidth + gap;
+        DrawText(target, reading.unit, g_fmtUnit,
+                 D2D1::RectF(unitLeft, top + 78, unitLeft + unitWidth, top + 108), unitBrush);
+    }
+    target->SetTransform(transform);
 }
 
 static std::wstring CardDetail(const CardDef& card) {
     const std::string key = card.key;
+    if (card.side == 'R' && !g_snapshot.remoteFresh) return T(L"数据离线", L"資料離線", L"No live data");
     auto value = [&](const char* name) -> std::wstring {
         auto it = g_snapshot.values.find(name);
         if (it == g_snapshot.values.end()) return L"—";
-        return FormatNumber(it->second, false);
+        return FormatNumber(it->second);
     };
     if (key == "cpu") return T(L"功耗 ", L"功耗 ", L"Power ") + value("cpuPwr") + L" W";
     if (key == "gpuT") return T(L"功耗 ", L"功耗 ", L"Power ") + value("gpuPwr") + L" W · " + T(L"使用率 ", L"使用率 ", L"usage ") + value("gpuUtil") + L"%";
@@ -415,8 +432,8 @@ static std::wstring CardDetail(const CardDef& card) {
     if (key == "dgxNvme") return T(L"本地盘", L"本機磁碟", L"local drive");
     if (key == "dgxMem") return T(L"共 ", L"共 ", L"of ") + value("dgxMemTot") + L" GB";
     if (key == "dgxLoad") return T(L"已运行 ", L"已執行 ", L"up ") + value("dgxUp") + T(L" 小时", L" 小時", L" h");
-    if (key == "netDown") return T(L"上传 ", L"上傳 ", L"up ") + value("netUp");
-    if (key == "netUp") return T(L"下载 ", L"下載 ", L"down ") + value("netDown");
+    if (key == "netDown") return T(L"上传 ", L"上傳 ", L"up ") + ReadCard(*FindCard("netUp")).Text();
+    if (key == "netUp") return T(L"下载 ", L"下載 ", L"down ") + ReadCard(*FindCard("netDown")).Text();
     if (key == "diskPct") {
         const std::wstring summary = value("diskUsed") + L" / " + value("diskTotal") + L" GB";
         return g_snapshot.diskDetail.empty() ? summary : summary + L" · " + g_snapshot.diskDetail;
@@ -425,42 +442,35 @@ static std::wstring CardDetail(const CardDef& card) {
 }
 
 // ---------------------------------------------------------------- painting
+static void DrawGlow(ID2D1RenderTarget* target, D2D1_ELLIPSE area, uint32_t color, float innerStop = 0.0f) {
+    const D2D1_GRADIENT_STOP stops[] = {
+        {innerStop, ToColorF(color)}, {1.0f, ToColorF(color & 0x00FFFFFFu)}};
+    ID2D1GradientStopCollection* colors = nullptr;
+    if (FAILED(target->CreateGradientStopCollection(stops, 2, &colors))) return;
+    ID2D1RadialGradientBrush* brush = nullptr;
+    const auto props = D2D1::RadialGradientBrushProperties(area.point, D2D1::Point2F(), area.radiusX, area.radiusY);
+    if (SUCCEEDED(target->CreateRadialGradientBrush(props, colors, &brush))) {
+        target->FillEllipse(area, brush);
+        brush->Release();
+    }
+    colors->Release();
+}
+
 static void DrawAmbient(ID2D1RenderTarget* target, D2D1_SIZE_F size, const theme::Palette& palette) {
-    // Two soft radial glows, matching AmbientTop / AmbientBottom in Dashboard.xaml.
-    const D2D1_GRADIENT_STOP topStops[2] = { { 0.0f, ToColorF(WithAlpha(palette.glowTop, 1.0f)) }, { 1.0f, ToColorF(WithAlpha(palette.glowTop, 0.0f)) } };
-    const D2D1_GRADIENT_STOP bottomStops[2] = { { 0.0f, ToColorF(WithAlpha(palette.glowBottom, 1.0f)) }, { 1.0f, ToColorF(WithAlpha(palette.glowBottom, 0.0f)) } };
-    ID2D1GradientStopCollection* collection = nullptr;
-    if (SUCCEEDED(target->CreateGradientStopCollection(topStops, 2, &collection)) && collection) {
-        ID2D1RadialGradientBrush* brush = nullptr;
-        D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES props{
-            D2D1::Point2F(size.width * 0.82f, size.height * 0.05f),
-            D2D1::Point2F(size.width * 0.82f, size.height * 0.05f),
-            size.width * 0.42f, size.height * 0.42f };
-        if (SUCCEEDED(target->CreateRadialGradientBrush(props, collection, &brush)) && brush) {
-            target->FillEllipse(D2D1::Ellipse(props.center, size.width * 0.42f, size.height * 0.30f), brush);
-            brush->Release();
-        }
-        collection->Release();
-    }
-    collection = nullptr;
-    if (SUCCEEDED(target->CreateGradientStopCollection(bottomStops, 2, &collection)) && collection) {
-        ID2D1RadialGradientBrush* brush = nullptr;
-        D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES props{
-            D2D1::Point2F(size.width * 0.10f, size.height * 0.95f),
-            D2D1::Point2F(size.width * 0.10f, size.height * 0.95f),
-            size.width * 0.40f, size.height * 0.40f };
-        if (SUCCEEDED(target->CreateRadialGradientBrush(props, collection, &brush)) && brush) {
-            target->FillEllipse(D2D1::Ellipse(props.center, size.width * 0.40f, size.height * 0.26f), brush);
-            brush->Release();
-        }
-        collection->Release();
-    }
+    DrawGlow(target, D2D1::Ellipse(D2D1::Point2F(size.width - 410, 130), 450, 250), palette.glowTop);
+    DrawGlow(target, D2D1::Ellipse(D2D1::Point2F(365, size.height - 90), 425, 190), palette.glowBottom);
 }
 
 static void DrawCard(ID2D1RenderTarget* target, const Placement& placement, D2D1_RECT_F rect, const theme::Palette& palette) {
     const CardDef& card = *placement.card;
     const float radius = 20.0f;
     const D2D1_ROUNDED_RECT rounded = D2D1::RoundedRect(rect, radius, radius);
+
+    if (!IsDesktopMode()) {
+        const auto halo = D2D1::Ellipse(D2D1::Point2F((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2 + 4),
+                                       (rect.right - rect.left) / 2 + 18, (rect.bottom - rect.top) / 2 + 17);
+        DrawGlow(target, halo, WithAlpha(palette.shadow | 0xFF000000u, palette.shadowOpacity), 0.55f);
+    }
 
     // Card surface: the palette gradient with the material's alpha multiplier.
     const D2D1_GRADIENT_STOP stops[3] = {
@@ -479,20 +489,26 @@ static void DrawCard(ID2D1RenderTarget* target, const Placement& placement, D2D1
     }
     if (collection) collection->Release();
 
-    // Rim: the palette's rim gradient, approximated with its mid stop.
-    ID2D1SolidColorBrush* rim = nullptr;
-    if (SUCCEEDED(target->CreateSolidColorBrush(ToColorF(palette.rim[1]), &rim)) && rim) {
-        target->DrawRoundedRectangle(rounded, rim, 1.2f);
-        rim->Release();
-    }
-
-    // Top gloss band.
-    ID2D1SolidColorBrush* gloss = nullptr;
-    if (SUCCEEDED(target->CreateSolidColorBrush(ToColorF(WithAlpha(palette.gloss, g_material.gloss / 0.45f)), &gloss)) && gloss) {
-        target->FillRoundedRectangle(
-            D2D1::RoundedRect(D2D1::RectF(rect.left + 1, rect.top + 1, rect.right - 1, rect.top + 58), radius, radius), gloss);
-        gloss->Release();
-    }
+    auto paintGradient = [&](const D2D1_GRADIENT_STOP* stops, UINT count, D2D1_RECT_F bounds, bool outline) {
+        ID2D1GradientStopCollection* colors = nullptr;
+        if (FAILED(target->CreateGradientStopCollection(stops, count, &colors))) return;
+        ID2D1LinearGradientBrush* brush = nullptr;
+        if (SUCCEEDED(target->CreateLinearGradientBrush(D2D1::LinearGradientBrushProperties(
+                D2D1::Point2F(bounds.left, bounds.top), D2D1::Point2F(bounds.right, bounds.bottom)), colors, &brush))) {
+            const auto shape = D2D1::RoundedRect(bounds, radius, radius);
+            if (outline) target->DrawRoundedRectangle(shape, brush, 1.2f);
+            else target->FillRoundedRectangle(shape, brush);
+            brush->Release();
+        }
+        colors->Release();
+    };
+    const D2D1_GRADIENT_STOP rim[] = {
+        {0.0f, ToColorF(palette.rim[0])}, {0.5f, ToColorF(palette.rim[1])}, {1.0f, ToColorF(palette.rim[2])}};
+    const D2D1_GRADIENT_STOP gloss[] = {
+        {0.0f, ToColorF(WithAlpha(palette.gloss, g_material.gloss / 0.58f))},
+        {1.0f, ToColorF(palette.gloss & 0x00FFFFFF)}};
+    paintGradient(gloss, 2, D2D1::RectF(rect.left + 1, rect.top + 1, rect.right - 1, rect.bottom - 1), false);
+    paintGradient(rim, 3, rect, true);
 
     ID2D1SolidColorBrush* accent = nullptr;
     ID2D1SolidColorBrush* textBrush = nullptr;
@@ -507,36 +523,81 @@ static void DrawCard(ID2D1RenderTarget* target, const Placement& placement, D2D1
         return;
     }
 
-    // Accent dot + title.
-    target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(rect.left + 24, rect.top + 26), 4.0f, 4.0f), accent);
-    DrawText(target, Tr(card), g_fmtTitle, D2D1::RectF(rect.left + 36, rect.top + 14, rect.right - 20, rect.top + 40), accent);
+    target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(rect.left + 28, rect.top + 27), 4.0f, 4.0f), accent);
+    secondary->SetColor(ToColorF(palette.label));
+    DrawText(target, Tr(card), g_fmtTitle,
+             D2D1::RectF(rect.left + 42, rect.top + 15, rect.right - (g_editMode ? 54 : 24), rect.top + 43), secondary);
+    secondary->SetColor(ToColorF(palette.secondary));
 
-    // Value + unit.
-    const std::wstring value = FormatValueForCard(card);
-    DrawText(target, value, g_fmtValue, D2D1::RectF(rect.left + 22, rect.top + 46, rect.right - 150, rect.top + 108), textBrush);
-    // Place the unit after the measured value width, not at a fixed fraction of
-    // the value box (which overlapped long values such as 2,066).
-    const float measured = MeasureTextWidth(value, g_fmtValue);
-    // Draw the unit directly after the measured number and let it use the rest
-    // of the card. A second clamp against the stats lane hid °C and RPM.
-    const float unitLeft = rect.left + 22 + measured + 10.0f;
-    DrawText(target, FormatUnitForCard(card), g_fmtUnit,
-             D2D1::RectF(unitLeft, rect.top + 78, rect.right - 18.0f, rect.top + 108), secondary);
+    const CardReading reading = ReadCard(card);
+    const std::string key = card.key;
+    const auto history = g_history.find(card.key);
+    const bool hasHistory = history != g_history.end() && !history->second.empty() &&
+                            (card.side != 'R' || g_snapshot.remoteFresh);
+    double max = 0, min = 0;
+    float statsLeft = rect.right - 24;
+    std::wstring stats[3];
+    if (hasHistory) {
+        max = min = history->second.front();
+        double sum = 0;
+        for (double sample : history->second) {
+            max = std::max(max, sample);
+            min = std::min(min, sample);
+            sum += sample;
+        }
+        const double mean = sum / history->second.size();
+        const std::wstring values[] = {
+            FormatCardSample(card, max), FormatCardSample(card, min), FormatCardSample(card, mean)
+        };
+        float valueWidth = 0;
+        for (int row = 0; row < 3; ++row) {
+            stats[row] = values[row];
+            valueWidth = std::max(valueWidth, MeasureTextWidth(stats[row], g_fmtStats));
+        }
+        statsLeft -= std::ceil(valueWidth) + 42;
+    }
 
-    // Rolling max/min/mean on the right.
-    auto history = g_history.find(card.key);
-    if (history != g_history.end() && !history->second.empty()) {
-        double max = history->second[0], min = history->second[0], sum = 0;
-        for (double sample : history->second) { max = std::max(max, sample); min = std::min(min, sample); sum += sample; }
-        const double mean = sum / double(history->second.size());
-        const std::wstring stats = T(L"最大 ", L"最大 ", L"max ") + FormatNumber(max, false) + L"\n" +
-                                   T(L"最小 ", L"最小 ", L"min ") + FormatNumber(min, false) + L"\n" +
-                                   T(L"均值 ", L"均值 ", L"avg ") + FormatNumber(mean, false);
-        DrawText(target, stats, g_fmtStats, D2D1::RectF(rect.right - 132, rect.top + 52, rect.right - 18, rect.top + 108), secondary);
+    const auto temperature = g_snapshot.values.find(card.key);
+    if (card.temperature && temperature != g_snapshot.values.end()) {
+        if (temperature->second >= 80) textBrush->SetColor(ToColorF(palette.bad));
+        else if (temperature->second >= 65) textBrush->SetColor(ToColorF(palette.warn));
+    }
+    DrawReading(target, reading, rect.left + 24, rect.top, statsLeft - (hasHistory ? 23 : 0), textBrush, secondary);
+    textBrush->SetColor(ToColorF(palette.text));
+
+    const auto barValue = card.bar ? g_snapshot.values.find(card.bar) : g_snapshot.values.end();
+    const bool hasBar = barValue != g_snapshot.values.end() && g_snapshot.values.contains(key);
+    if (hasBar) {
+        const float left = rect.left + 24, right = rect.right - 24, top = rect.top + 127;
+        secondary->SetColor(ToColorF(palette.track));
+        target->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(left, top, right, top + 4), 2, 2), secondary);
+        secondary->SetColor(ToColorF(palette.secondary));
+        const float amount = float(std::clamp(barValue->second, 0.0, 100.0) / 100.0);
+        if (amount > 0) target->FillRoundedRectangle(D2D1::RoundedRect(
+            D2D1::RectF(left, top, left + (right - left) * amount, top + 4), 2, 2), accent);
+    }
+
+    if (hasHistory) {
+        const std::wstring labels[] = {
+            T(L"最大", L"最大", L"Max"), T(L"最小", L"最小", L"Min"), T(L"均值", L"均值", L"Avg")
+        };
+        secondary->SetColor(ToColorF(WithAlpha(palette.secondary, 0.23f)));
+        target->DrawLine(D2D1::Point2F(statsLeft - 10, rect.top + 53),
+                         D2D1::Point2F(statsLeft - 10, rect.top + 108), secondary);
+        for (int row = 0; row < 3; ++row) {
+            const float y = rect.top + 49 + row * 20.0f;
+            secondary->SetColor(ToColorF(palette.muted));
+            DrawText(target, labels[row], g_fmtStatLabel,
+                     D2D1::RectF(statsLeft, y, statsLeft + 37, y + 20), secondary);
+            secondary->SetColor(ToColorF(palette.secondary));
+            DrawText(target, stats[row], g_fmtStats,
+                     D2D1::RectF(statsLeft + 40, y, rect.right - 24, y + 20), secondary);
+        }
 
         // Sparkline over the last samples.
-        if (history->second.size() >= 3 && CardDetail(card).size() <= 42) {
-            const float sparkLeft = rect.right - 150, sparkWidth = 128.0f, sparkTop = rect.top + 128, sparkHeight = 26.0f;
+        if (history->second.size() >= 3 && !hasBar && g_snapshot.values.contains(key)) {
+            const float sparkLeft = rect.left + 24, sparkWidth = rect.right - rect.left - 48;
+            const float sparkTop = rect.top + 116, sparkHeight = 24;
             double high = max, low = min;
             if (high - low < 2) high = low + 2;
             std::vector<D2D1_POINT_2F> points;
@@ -546,37 +607,36 @@ static void DrawCard(ID2D1RenderTarget* target, const Placement& placement, D2D1
                 float y = sparkTop + 2 + (sparkHeight - 4) - (sparkHeight - 4) * float((samples[i] - low) / (high - low));
                 points.push_back(D2D1::Point2F(x, y));
             }
-            for (size_t i = 1; i < points.size(); ++i) target->DrawLine(points[i - 1], points[i], accent, 2.0f);
+            for (size_t i = 1; i < points.size(); ++i) target->DrawLine(points[i - 1], points[i], accent, 1.6f);
         }
     }
 
-    // Long details wrap and take the full width; the sparkline yields to them
-    // instead of truncating drive or sensor information.
-    const std::wstring detail = CardDetail(card);
-    const float detailRight = detail.size() > 42 ? rect.right - 22.0f : rect.right - 164.0f;
-    DrawText(target, detail, g_fmtDetail ? g_fmtDetail : g_fmtSmall,
-             D2D1::RectF(rect.left + 22, rect.bottom - 46, detailRight, rect.bottom - 8), secondary);
+    DrawText(target, CardDetail(card), g_fmtCardSub,
+             D2D1::RectF(rect.left + 24, rect.bottom - 34, rect.right - 24, rect.bottom - 11), secondary);
+    if (g_editMode) {
+        const auto button = D2D1::RectF(rect.right - 46, rect.top + 8, rect.right - 10, rect.top + 36);
+        target->DrawRoundedRectangle(D2D1::RoundedRect(button, 8, 8), secondary);
+        DrawText(target, L"↔", g_fmtButton,
+                 D2D1::RectF(button.left + 10, button.top + 4, button.right, button.bottom), textBrush);
+    }
     accent->Release();
     textBrush->Release();
     secondary->Release();
 }
 
 static void DrawHeader(ID2D1RenderTarget* target, D2D1_SIZE_F size, const theme::Palette& palette) {
-    ID2D1SolidColorBrush* local = nullptr;
     ID2D1SolidColorBrush* text = nullptr;
     ID2D1SolidColorBrush* secondary = nullptr;
-    target->CreateSolidColorBrush(ToColorF(palette.local), &local);
     target->CreateSolidColorBrush(ToColorF(palette.text), &text);
     target->CreateSolidColorBrush(ToColorF(palette.secondary), &secondary);
-    if (local && text) {
-        DrawText(target, T(L"系统 / 实时监控", L"系統 / 即時監控", L"SYSTEM / LIVE MONITOR"),
-                 g_fmtEyebrow, D2D1::RectF(48, 18, 640, 38), local);
+    if (text) {
         DrawText(target, T(L"系统状态", L"系統狀態", L"System status"),
-                 g_fmtHeader, D2D1::RectF(46, 36, 640, 82), text);
+                 g_fmtHeader, D2D1::RectF(48, 24, 640, 76), text);
     }
     if (secondary) {
-        std::wstring status = g_statusText.empty() ? T(L"启动中", L"啟動中", L"starting") : g_statusText;
-        DrawText(target, status, g_fmtSmall, D2D1::RectF(48, size.height - 42, size.width - 48, size.height - 16), secondary);
+        secondary->SetColor(ToColorF(WithAlpha(palette.secondary, 0.2f)));
+        target->DrawLine(D2D1::Point2F(48, 88), D2D1::Point2F(size.width - 48, 88), secondary);
+        secondary->SetColor(ToColorF(palette.secondary));
     }
     // Status pill and header buttons mirror StatusBorder / ThemeButton / HideButton.
     ID2D1SolidColorBrush* pill = nullptr;
@@ -586,29 +646,30 @@ static void DrawHeader(ID2D1RenderTarget* target, D2D1_SIZE_F size, const theme:
     target->CreateSolidColorBrush(ToColorF(palette.pillBorder), &pillRim);
     target->CreateSolidColorBrush(ToColorF(g_snapshot.remoteFresh ? 0xFF6EE7ACu : 0xFFFF727Cu), &dot);
     const float right = size.width;
-    const D2D1_RECT_F statusRect = D2D1::RectF(right - 566, 20, right - 256, 58);
+    const std::wstring status = g_statusText.empty() ? T(L"启动中", L"啟動中", L"starting") : g_statusText;
+    const float statusRight = right - 158;
+    const float statusWidth = std::clamp(MeasureTextWidth(status, g_fmtSmall) + 48.0f, 100.0f, 550.0f);
+    const D2D1_RECT_F statusRect = D2D1::RectF(statusRight - statusWidth, 29, statusRight, 65);
     if (pill) target->FillRoundedRectangle(D2D1::RoundedRect(statusRect, 18, 18), pill);
     if (pillRim) target->DrawRoundedRectangle(D2D1::RoundedRect(statusRect, 18, 18), pillRim, 1.0f);
     if (dot) target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(statusRect.left + 18, statusRect.top + 19), 4, 4), dot);
-    const std::wstring status = g_statusText.empty() ? T(L"启动中", L"啟動中", L"starting") : g_statusText;
     DrawText(target, status, g_fmtSmall,
              D2D1::RectF(statusRect.left + 32, statusRect.top + 8, statusRect.right - 10, statusRect.bottom - 4), text ? text : secondary);
 
-    g_themeRect = RECT{ (LONG)(right - 240), 20, (LONG)(right - 144), 58 };
-    g_hideRect = RECT{ (LONG)(right - 128), 20, (LONG)(right - 32), 58 };
+    g_themeRect = RECT{ (LONG)(right - 146), 28, (LONG)(right - 108), 66 };
+    g_hideRect = RECT{ (LONG)(right - 86), 28, (LONG)(right - 48), 66 };
     auto headerButton = [&](RECT rect, const std::wstring& label) {
         const D2D1_RECT_F box = D2D1::RectF((float)rect.left, (float)rect.top, (float)rect.right, (float)rect.bottom);
         if (pill) target->FillRoundedRectangle(D2D1::RoundedRect(box, 11, 11), pill);
         if (pillRim) target->DrawRoundedRectangle(D2D1::RoundedRect(box, 11, 11), pillRim, 1.0f);
-        DrawText(target, label, g_fmtButton, D2D1::RectF(box.left + 10, box.top + 7, box.right - 8, box.bottom - 3), text ? text : secondary);
+        DrawText(target, label, g_fmtIcon, D2D1::RectF(box.left + 11, box.top + 9, box.right, box.bottom), text ? text : secondary);
     };
-    headerButton(g_themeRect, T(L"主题", L"主題", L"Theme"));
-    headerButton(g_hideRect, T(L"隐藏", L"隱藏", L"Hide"));
+    headerButton(g_themeRect, L"\uE708");
+    headerButton(g_hideRect, L"\uE921");
 
     if (pill) pill->Release();
     if (pillRim) pillRim->Release();
     if (dot) dot->Release();
-    if (local) local->Release();
     if (text) text->Release();
     if (secondary) secondary->Release();
 }
@@ -627,9 +688,9 @@ static void Render() {
     g_target->SetTransform(D2D1::Matrix3x2F::Scale(g_scale, g_scale));
     if (!IsDesktopMode()) {
         const D2D1_GRADIENT_STOP stops[3] = {
-            { 0.0f, ToColorF(palette.bg[0]) },
-            { 0.52f, ToColorF(palette.bg[1]) },
-            { 1.0f, ToColorF(palette.bg[2]) }
+            { 0.0f, ToColorF((palette.bg[0] & 0x00FFFFFFu) | 0xEF000000u) },
+            { 0.52f, ToColorF((palette.bg[1] & 0x00FFFFFFu) | 0xEF000000u) },
+            { 1.0f, ToColorF((palette.bg[2] & 0x00FFFFFFu) | 0xEF000000u) }
         };
         ID2D1GradientStopCollection* collection = nullptr;
         ID2D1LinearGradientBrush* background = nullptr;
@@ -646,53 +707,46 @@ static void Render() {
     const D2D1_SIZE_F size = D2D1::SizeF(kLogicalWidth, LogicalHeight());
     if (!IsDesktopMode()) {
         DrawAmbient(g_target, size, palette);
-        DrawHeader(g_target, size, palette);
+        if (ShowsChrome()) DrawHeader(g_target, size, palette);
     }
 
-    BuildPlacements(4);
+    BuildPlacements();
+    g_scrollOffset = std::min(g_scrollOffset, MaximumScroll());
     const float viewTop = ContentViewTop();
     const float viewBottom = viewTop + ContentViewHeight();
 
-    if (!IsDesktopMode()) {
-        // Section headers mirror LocalSectionHeader / RemoteSectionHeader.
-        ID2D1SolidColorBrush* localBrush = nullptr;
-        ID2D1SolidColorBrush* remoteBrush = nullptr;
-        ID2D1SolidColorBrush* titleBrush = nullptr;
-        g_target->CreateSolidColorBrush(ToColorF(palette.local), &localBrush);
-        g_target->CreateSolidColorBrush(ToColorF(palette.remote), &remoteBrush);
-        g_target->CreateSolidColorBrush(ToColorF(palette.secondary), &titleBrush);
-        const float gutter = 28.0f;
-        const float halfWidth = (1504.0f - gutter) / 2.0f;
-        const float headingTop = viewTop - g_scrollOffset;
-        if (localBrush && titleBrush) {
-            DrawText(g_target, kLocalEyebrowZh, g_fmtEyebrow,
-                     D2D1::RectF(48, headingTop, 48 + halfWidth, headingTop + 20), localBrush);
-            DrawText(g_target, (g_language == "en" ? kLocalTitleEn : kLocalTitleZh), g_fmtSmall,
-                     D2D1::RectF(46, headingTop + 18, 48 + halfWidth, headingTop + 46), titleBrush);
-        }
-        if (remoteBrush && titleBrush) {
-            const float remoteLeft = 48 + halfWidth + gutter;
-            DrawText(g_target, kRemoteEyebrowZh, g_fmtEyebrow,
-                     D2D1::RectF(remoteLeft, headingTop, remoteLeft + halfWidth, headingTop + 20), remoteBrush);
-            DrawText(g_target, kRemoteTitleZh, g_fmtSmall,
-                     D2D1::RectF(remoteLeft - 2, headingTop + 18, remoteLeft + halfWidth, headingTop + 46), titleBrush);
-        }
-        if (localBrush) localBrush->Release();
-        if (remoteBrush) remoteBrush->Release();
-        if (titleBrush) titleBrush->Release();
-    }
+    g_target->PushAxisAlignedClip(D2D1::RectF(0, viewTop, kLogicalWidth, viewBottom), D2D1_ANTIALIAS_MODE_ALIASED);
+
 
     for (const auto& placement : g_placements) {
         const float top = placement.y - g_scrollOffset;
-        if (top + placement.h < viewTop - 4 || top > viewBottom) continue;   // cull off-screen rows
+        if (g_cardMoved && g_dragCard == placement.card->key) continue;
+        if (top + placement.h <= viewTop || top >= viewBottom) continue;
         DrawCard(g_target, placement, D2D1::RectF(placement.x, top, placement.x + placement.w, top + placement.h), palette);
     }
+    if (g_cardMoved) {
+        const auto it = std::ranges::find_if(g_placements, [](const auto& p) { return g_dragCard == p.card->key; });
+        if (it != g_placements.end()) {
+            const float x = kContentLeft + g_dragTarget.column * kCardWidth;
+            const float y = viewTop + g_dragTarget.row * kCellHeight - g_scrollOffset;
+            DrawCard(g_target, *it, D2D1::RectF(x, y, x + it->w, y + it->h), palette);
+        }
+    }
+    if (IsDesktopMode()) DrawInsightsRail(g_target, palette);
+    g_target->PopAxisAlignedClip();
 
     DrawEditToolbar(g_target, palette);
+    const auto grip = ResizeGripBounds();
+    ID2D1SolidColorBrush* gripBrush = nullptr;
+    if (grip.right > grip.left && SUCCEEDED(g_target->CreateSolidColorBrush(ToColorF(palette.buttonBg), &gripBrush))) {
+        g_target->FillRoundedRectangle(D2D1::RoundedRect(grip, 9, 9), gripBrush);
+        gripBrush->SetColor(ToColorF(palette.secondary));
+        DrawText(g_target, L"↘", g_fmtSmall,
+            D2D1::RectF(grip.left + 8, grip.top + 3, grip.right, grip.bottom), gripBrush);
+        gripBrush->Release();
+    }
 
-    if (IsDesktopMode()) DrawInsightsRail(g_target, palette);
-
-    if (!IsDesktopMode()) {
+    if (ShowsChrome()) {
         ID2D1SolidColorBrush* muted = nullptr;
         if (SUCCEEDED(g_target->CreateSolidColorBrush(ToColorF(palette.muted), &muted)) && muted) {
             DrawText(g_target,
@@ -703,86 +757,102 @@ static void Render() {
         }
     }
 
-    g_target->EndDraw();
-    g_regionDirty = true;
+    if (g_target->EndDraw() == D2DERR_RECREATE_TARGET) {
+        g_target->Release();
+        g_target = nullptr;
+        InvalidateRect(g_hwnd, nullptr, FALSE);
+    }
 }
 
 // ---------------------------------------------------------------- desktop mask
-static std::vector<RECT> DesktopIconRects() {
-    std::vector<RECT> rects;
+static const std::vector<RECT>& DesktopIconRects() {
+    static std::vector<RECT> cached;
+    static ULONGLONG refreshAfter = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (now < refreshAfter) return cached;
+    refreshAfter = now + 3000;
+
+    HWND icons = nullptr;
+    EnumWindows([](HWND window, LPARAM state) -> BOOL {
+        HWND view = FindWindowExW(window, nullptr, L"SHELLDLL_DefView", nullptr);
+        HWND list = view ? FindWindowExW(view, nullptr, L"SysListView32", nullptr) : nullptr;
+        if (!list) return TRUE;
+        *reinterpret_cast<HWND*>(state) = list;
+        return FALSE;
+    }, reinterpret_cast<LPARAM>(&icons));
+    if (!icons) return cached;
+    if (!IsWindowVisible(icons)) {
+        cached.clear();
+        return cached;
+    }
+
     IUIAutomation* automation = nullptr;
-    if (FAILED(CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&automation))) || !automation)
-        return rects;
-    IUIAutomationElement* root = nullptr;
-    if (SUCCEEDED(automation->GetRootElement(&root)) && root) {
-        VARIANT type; VariantInit(&type); type.vt = VT_I4; type.lVal = UIA_ListControlTypeId;
-        IUIAutomationCondition* condition = nullptr;
-        if (SUCCEEDED(automation->CreatePropertyCondition(UIA_ControlTypePropertyId, type, &condition)) && condition) {
-            IUIAutomationElementArray* lists = nullptr;
-            if (SUCCEEDED(root->FindAll(TreeScope_Descendants, condition, &lists)) && lists) {
-                int count = 0; lists->get_Length(&count);
-                for (int i = 0; i < count; ++i) {
-                    IUIAutomationElement* list = nullptr;
-                    if (FAILED(lists->GetElement(i, &list)) || !list) continue;
-                    IUIAutomationElementArray* items = nullptr;
-                    if (SUCCEEDED(list->FindAll(TreeScope_Children, nullptr, &items)) && items) {
-                        int itemCount = 0; items->get_Length(&itemCount);
-                        for (int j = 0; j < itemCount && j < 512; ++j) {
-                            IUIAutomationElement* item = nullptr;
-                            if (FAILED(items->GetElement(j, &item)) || !item) continue;
-                            RECT bounds{};
-                            if (SUCCEEDED(item->get_CurrentBoundingRectangle(&bounds)) &&
-                                bounds.right > bounds.left && bounds.bottom > bounds.top) rects.push_back(bounds);
-                            item->Release();
-                        }
-                        items->Release();
-                    }
-                    list->Release();
+    if (FAILED(CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&automation))))
+        return cached;
+    IUIAutomationElement* list = nullptr;
+    if (SUCCEEDED(automation->ElementFromHandle(icons, &list)) && list) {
+        IUIAutomationCondition* any = nullptr;
+        IUIAutomationElementArray* items = nullptr;
+        if (SUCCEEDED(automation->CreateTrueCondition(&any)) &&
+            SUCCEEDED(list->FindAll(TreeScope_Children, any, &items)) && items) {
+            int count = 0;
+            if (SUCCEEDED(items->get_Length(&count))) {
+                std::vector<RECT> bounds;
+                for (int i = 0; i < count && i < 512; ++i) {
+                    IUIAutomationElement* item = nullptr;
+                    if (FAILED(items->GetElement(i, &item)) || !item) continue;
+                    RECT rect{};
+                    if (SUCCEEDED(item->get_CurrentBoundingRectangle(&rect)) &&
+                        rect.right > rect.left && rect.bottom > rect.top) bounds.push_back(rect);
+                    item->Release();
                 }
-                lists->Release();
+                cached = std::move(bounds);
             }
-            condition->Release();
+            items->Release();
         }
-        root->Release();
+        if (any) any->Release();
+        list->Release();
     }
     automation->Release();
-    return rects;
+    return cached;
 }
 
 static void ApplyRegion() {
     RECT window{};
     GetWindowRect(g_hwnd, &window);
     HRGN region = CreateRectRgn(0, 0, 0, 0);
-    BuildPlacements(4);
+    BuildPlacements();
     const int width = window.right - window.left, height = window.bottom - window.top;
     const float scale = g_scale > 0 ? g_scale : 1.0f;
+    const int viewTop = int(ContentViewTop() * scale);
+    const int viewBottom = std::min(height, int((ContentViewTop() + ContentViewHeight()) * scale));
     for (const auto& placement : g_placements) {
         int left = (int)(placement.x * scale);
         int top = (int)((placement.y - g_scrollOffset) * scale);
         int right = (int)((placement.x + placement.w) * scale);
         int bottom = (int)((placement.y - g_scrollOffset + placement.h) * scale);
         if (right <= left || bottom <= top) continue;
-        if (bottom < 0 || top > height) continue;
-        HRGN piece = CreateRectRgn(left, std::max(0, top), right, std::min(height, bottom));
+        if (bottom <= viewTop || top >= viewBottom) continue;
+        HRGN piece = CreateRoundRectRgn(left, std::max(viewTop, top), right + 1, std::min(viewBottom, bottom) + 1,
+                                       int(40 * scale), int(40 * scale));
         CombineRgn(region, region, piece, RGN_OR);
         DeleteObject(piece);
     }
-    if (!IsDesktopMode()) {
-        // In normal mode the whole window is interactive.
+    if (!IsDesktopMode() || g_editMode || g_panelAdjusting) {
+        // A full region keeps capture and previews working across empty slots.
         HRGN whole = CreateRectRgn(0, 0, width, height);
         CombineRgn(region, region, whole, RGN_OR);
         DeleteObject(whole);
     } else {
-        if (g_settings.insightsRail) {
-            // The rail is interactive like a card and must remain in the region.
-            const int left = (int)(1192 * scale);
-            const int top = (int)(12 * scale);
-            const int right = (int)((1192 + 300) * scale);
-            const int bottom = (int)((ContentViewHeight() - 12) * scale);
-            HRGN rail = CreateRectRgn(left, top, right, bottom);
-            CombineRgn(region, region, rail, RGN_OR);
-            DeleteObject(rail);
-        }
+        auto add = [&](D2D1_RECT_F bounds) {
+            if (bounds.right <= bounds.left || bounds.bottom <= bounds.top) return;
+            HRGN part = CreateRectRgn(int(bounds.left * scale), int(bounds.top * scale),
+                                      int(bounds.right * scale), int(bounds.bottom * scale));
+            CombineRgn(region, region, part, RGN_OR);
+            DeleteObject(part);
+        };
+        add(InsightsBounds());
+        add(ResizeGripBounds());
         for (const auto& icon : DesktopIconRects()) {
             HRGN hole = CreateRectRgn(icon.left - window.left, icon.top - window.top,
                                       icon.right - window.left, icon.bottom - window.top);
@@ -790,7 +860,10 @@ static void ApplyRegion() {
             DeleteObject(hole);
         }
     }
-    SetWindowRgn(g_hwnd, region, TRUE);
+    HRGN previous = CreateRectRgn(0, 0, 0, 0);
+    const bool unchanged = GetWindowRgn(g_hwnd, previous) != ERROR && EqualRgn(previous, region);
+    DeleteObject(previous);
+    if (unchanged || !SetWindowRgn(g_hwnd, region, TRUE)) DeleteObject(region);
 }
 
 // ---------------------------------------------------------------- text formats
@@ -805,16 +878,29 @@ static void CreateFormats(const wchar_t* family) {
     };
     // Match the WPF card typography: title/unit/subline sizes are not scaled
     // down independently of the window's logical scale.
-    make(15.0f, DWRITE_FONT_WEIGHT_BOLD, &g_fmtTitle);
-    make(44.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &g_fmtValue);
+    make(17.0f, DWRITE_FONT_WEIGHT_MEDIUM, &g_fmtTitle);
+    make(46.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &g_fmtValue);
     make(15.0f, DWRITE_FONT_WEIGHT_NORMAL, &g_fmtUnit);
     make(14.0f, DWRITE_FONT_WEIGHT_NORMAL, &g_fmtSmall);
-    make(11.0f, DWRITE_FONT_WEIGHT_NORMAL, &g_fmtStats);
-    make(12.0f, DWRITE_FONT_WEIGHT_NORMAL, &g_fmtDetail);
+    make(13.0f, DWRITE_FONT_WEIGHT_MEDIUM, &g_fmtStats);
+    make(12.0f, DWRITE_FONT_WEIGHT_NORMAL, &g_fmtStatLabel);
+    make(16.0f, DWRITE_FONT_WEIGHT_NORMAL, &g_fmtDetail);
+    make(14.0f, DWRITE_FONT_WEIGHT_NORMAL, &g_fmtCardSub);
+    if (g_fmtCardSub) {
+        IDWriteInlineObject* ellipsis = nullptr;
+        const DWRITE_TRIMMING trim{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+        if (SUCCEEDED(g_dwrite->CreateEllipsisTrimmingSign(g_fmtCardSub, &ellipsis))) {
+            g_fmtCardSub->SetTrimming(&trim, ellipsis);
+            ellipsis->Release();
+        }
+    }
+    if (g_fmtStats) g_fmtStats->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
     if (g_fmtDetail) g_fmtDetail->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
-    make(30.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &g_fmtHeader);
+    make(34.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &g_fmtHeader);
     make(12.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &g_fmtEyebrow);
     make(13.0f, DWRITE_FONT_WEIGHT_NORMAL, &g_fmtButton);
+    g_dwrite->CreateTextFormat(L"Segoe MDL2 Assets", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+        DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 15.0f, L"en-US", &g_fmtIcon);
 }
 
 // ---------------------------------------------------------------- tick
@@ -826,16 +912,17 @@ static void UpdateMetrics() {
         samples.push_back(value);
         if (samples.size() > 60) samples.erase(samples.begin());
     }
-    wchar_t buffer[128];
     if (g_snapshot.remoteAgeSec >= 0 && g_snapshot.remoteFresh) {
+        wchar_t buffer[128]{};
         std::swprintf(buffer, 128, T(L"DGX 在线 · %.0f 秒前", L"DGX 線上 · %.0f 秒前", L"DGX online · %.0f s ago").c_str(), g_snapshot.remoteAgeSec);
+        g_statusText = buffer;
     } else if (!g_snapshot.remoteError.empty()) {
-        const std::wstring message = T(L"DGX 连接失败 · ", L"DGX 連線失敗 · ", L"DGX connection failed · ") + g_snapshot.remoteError.substr(0, 90);
-        std::swprintf(buffer, 128, L"%s", message.c_str());
+        g_statusText = T(L"DGX 连接失败 · ", L"DGX 連線失敗 · ", L"DGX connection failed · ") + g_snapshot.remoteError.substr(0, 90);
+        const auto lineEnd = g_statusText.find_first_of(L"\r\n");
+        if (lineEnd != std::wstring::npos) g_statusText.resize(lineEnd);
     } else {
-        std::swprintf(buffer, 128, L"%s", T(L"DGX 离线", L"DGX 離線", L"DGX offline").c_str());
+        g_statusText = T(L"DGX 离线", L"DGX 離線", L"DGX offline");
     }
-    g_statusText = buffer;
     InvalidateRect(g_hwnd, nullptr, FALSE);
 }
 
@@ -857,8 +944,20 @@ static void ToggleTray(bool show) {
     }
 }
 
+static void CloseDetail();
+static void SetEditing(bool cards, bool panel);
+
+static bool PanelIsShown() {
+    return IsWindowVisible(g_hwnd) && !IsIconic(g_hwnd);
+}
+
 static void ShowPanel(bool visible) {
-    ShowWindow(g_hwnd, visible ? SW_SHOWNOACTIVATE : SW_HIDE);
+    if (!visible) {
+        CloseDetail();
+        if (g_editMode || g_panelAdjusting) SetEditing(false, false);
+    }
+    if (visible && IsIconic(g_hwnd)) ShowWindow(g_hwnd, SW_RESTORE);
+    else ShowWindow(g_hwnd, visible ? SW_SHOWNOACTIVATE : SW_HIDE);
     if (visible) {
         ApplyPlacement(false);
         if (!IsDesktopMode()) {
@@ -884,31 +983,56 @@ static void UpdateBackdrop() {
 }
 
 static void SetLayerMode(const std::string& mode, bool persist) {
+    CloseDetail();
+    if (GetCapture() == g_hwnd) ReleaseCapture();
+    g_editMode = false;
+    g_panelAdjusting = false;
     g_settings.layerMode = mode;
+    g_scrollOffset = 0;
+    if (mode != "bottom") SetWindowRgn(g_hwnd, nullptr, TRUE);
     // Shared position: a layer switch keeps the panel where it is.
     RECT window{};
     GetWindowRect(g_hwnd, &window);
-    g_settings.normalX = window.left; g_settings.normalY = window.top;
-    g_settings.desktopX = window.left; g_settings.desktopY = window.top;
+    if (persist) {
+        g_settings.normalX = window.left; g_settings.normalY = window.top;
+        g_settings.desktopX = window.left; g_settings.desktopY = window.top;
+    }
 
     LONG_PTR ex = GetWindowLongPtrW(g_hwnd, GWL_EXSTYLE);
     if (mode == "bottom") ex |= WS_EX_NOACTIVATE; else ex &= ~WS_EX_NOACTIVATE;
     SetWindowLongPtrW(g_hwnd, GWL_EXSTYLE, ex);
-    SetWindowPos(g_hwnd, mode == "top" ? HWND_TOPMOST : (mode == "bottom" ? HWND_BOTTOM : HWND_NOTOPMOST),
+    SetWindowPos(g_hwnd, mode == "top" ? HWND_TOPMOST : HWND_NOTOPMOST,
                  0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     UpdateBackdrop();
     ApplyPlacement(false);
     if (persist) cfg::Save(g_settings);
-    g_regionDirty = true;
+}
+
+static void SetEditing(bool cards, bool panel) {
+    if (GetCapture() == g_hwnd) ReleaseCapture();
+    const bool desktop = IsDesktopMode();
+    const bool wasEditing = g_editMode || g_panelAdjusting;
+    g_editMode = cards;
+    g_panelAdjusting = desktop && panel;
+    const bool editing = g_editMode || g_panelAdjusting;
+    if (desktop && editing != wasEditing) {
+        LONG_PTR style = GetWindowLongPtrW(g_hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(g_hwnd, GWL_EXSTYLE, editing ? style & ~WS_EX_NOACTIVATE : style | WS_EX_NOACTIVATE);
+        SetWindowPos(g_hwnd, editing ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        if (editing) SetForegroundWindow(g_hwnd);
+    }
+    ApplyPlacement(true);
+    InvalidateRect(g_hwnd, nullptr, FALSE);
 }
 
 static void StepScale(double delta) {
     if (IsDesktopMode()) {
-        const double current = g_settings.desktopScale > 0.001 ? g_settings.desktopScale : (g_scale > 0.001 ? g_scale : 1.0);
+        const double current = g_scale * 96.0 / GetDpiForWindow(g_hwnd);
         g_settings.desktopScale = std::min(2.0, std::max(0.4, current + delta));
     } else {
-        double width = g_settings.normalWidthDip > 0 ? g_settings.normalWidthDip : 1600.0;
-        width = std::min(3840.0, std::max(800.0, width * (1.0 + delta)));
+        double width = 1600.0 * g_scale * 96.0 / GetDpiForWindow(g_hwnd);
+        width = std::clamp(width * (1.0 + delta), 600.0, 3840.0);
         g_settings.normalWidthDip = width;
         g_settings.normalHeightDip = width * PanelBaseHeight(false) / 1600.0;
     }
@@ -942,25 +1066,68 @@ static void SetAutoStart(bool enabled) {
     RegCloseKey(key);
 }
 
-static void ShowDetail(int index) {
-    if (index < 0 || index >= (int)g_placements.size()) return;
-    const CardDef& card = *g_placements[index].card;
-    g_trackedKey = card.key;
-    std::wstring message = Tr(card);
-    message += L"\n";
-    message += FormatValueForCard(card) + L" " + FormatUnitForCard(card);
-    message += L"\n";
-    message += CardDetail(card);
-    MessageBoxW(g_hwnd, message.c_str(), T(L"卡片详情", L"卡片詳情", L"Card detail").c_str(), MB_OK | MB_ICONINFORMATION);
-}
+#include "detail.h"
 
 #include "manager.h"
 #include "remote.h"
 
-static void ShowContextMenu(int x, int y) {
+static void AutoArrangeCards(bool groupByHost) {
+    auto cards = ActiveCards();
+    auto importance = [](std::string key) {
+        std::ranges::transform(key, key.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+        auto contains = [&](const char* text) { return key.find(text) != std::string::npos; };
+        if (contains("cpu") || contains("gpu") || contains("vrm") || contains("temp")) return 0;
+        if (contains("mem") || contains("load")) return 1;
+        if (contains("disk") || contains("nvme") || contains("net")) return 2;
+        if (contains("fan") || contains("rpm") || contains("pump")) return 3;
+        return 4;
+    };
+    std::ranges::sort(cards, [&](const auto& first, const auto& second) {
+        auto key = [&](const auto& card) {
+            const char side = FindCard(card.key)->side;
+            const int group = groupByHost ? (side == 'L' ? 0 : (side == 'R' ? 1 : 2)) : 0;
+            return std::tuple{group, importance(card.key), card.key};
+        };
+        return key(first) < key(second);
+    });
+    layout::Slots preferred;
+    if (groupByHost) {
+        int lanes[2]{};
+        for (const auto& card : cards) {
+            const bool remote = FindCard(card.key)->side == 'R';
+            int& next = lanes[remote];
+            if (next % 2 + card.span > 2) ++next;
+            if (next / 2 < layout::kRows) preferred[card.key] = {next / 2, int(remote) * 2 + next % 2};
+            next += card.span;
+        }
+    }
+    g_settings.cardSlots = layout::Pack(cards, preferred);
+    g_settings.cardOrder.clear();
+    for (const auto& card : cards) g_settings.cardOrder.push_back(card.key);
+    g_settings.customLayout = true;
+    g_scrollOffset = 0;
+    cfg::Save(g_settings);
+}
+
+static void ShowContextMenu(int x, int y, bool fromTray = false, const CardDef* card = nullptr) {
+    CloseDetail();
     HMENU menu = CreatePopupMenu();
+    if (card) {
+        if (!g_editMode) AppendMenuW(menu, MF_STRING, 110, T(L"显示详情", L"顯示詳情", L"Show details").c_str());
+        AppendMenuW(menu, MF_STRING, 111, (CardSpan(card->key) == 2
+            ? T(L"切换为短卡", L"切換為短卡", L"Use short card")
+            : T(L"切换为长卡", L"切換為長卡", L"Use long card")).c_str());
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    }
+    if (fromTray) AppendMenuW(menu, MF_STRING, 602, T(L"显示 / 隐藏", L"顯示 / 隱藏", L"Show / hide").c_str());
     AppendMenuW(menu, MF_STRING | ((g_editMode || g_panelAdjusting) ? MF_CHECKED : 0), 100,
                 (g_editMode || g_panelAdjusting) ? T(L"完成编辑", L"完成編輯", L"Done").c_str() : T(L"编辑布局", L"編輯佈局", L"Edit layout").c_str());
+    AppendMenuW(menu, MF_STRING | (g_settings.freePlacement ? MF_CHECKED : 0), 112,
+        T(L"自由放置", L"自由放置", L"Free placement").c_str());
+    HMENU arrange = CreatePopupMenu();
+    AppendMenuW(arrange, MF_STRING, 113, T(L"按主机整理", L"依主機整理", L"By host").c_str());
+    AppendMenuW(arrange, MF_STRING, 114, T(L"按硬件重要性整理", L"依硬體重要性整理", L"By hardware priority").c_str());
+    AppendMenuW(menu, MF_POPUP, (UINT_PTR)arrange, T(L"自动整理", L"自動整理", L"Auto arrange").c_str());
     HMENU scales = CreatePopupMenu();
     AppendMenuW(scales, MF_STRING | (g_settings.preset == "auto" ? MF_CHECKED : 0), 700, T(L"自动适配", L"自動適配", L"Auto fit").c_str());
     AppendMenuW(scales, MF_STRING | (g_settings.preset == "1080p" ? MF_CHECKED : 0), 701, L"1080p");
@@ -1006,18 +1173,30 @@ static void ShowContextMenu(int x, int y) {
     AppendMenuW(menu, MF_STRING, 600, T(L"隐藏", L"隱藏", L"Hide").c_str());
     AppendMenuW(menu, MF_STRING, 601, T(L"退出", L"結束", L"Quit").c_str());
 
+    if (fromTray) SetForegroundWindow(g_hwnd);
     int command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y, 0, g_hwnd, nullptr);
+    if (fromTray) PostMessageW(g_hwnd, WM_NULL, 0, 0);
     DestroyMenu(menu);
     switch (command) {
     case 100:
-        if (g_editMode || g_panelAdjusting) { g_editMode = false; g_panelAdjusting = false; }
-        else if (IsDesktopMode()) g_panelAdjusting = true;
-        else g_editMode = true;
+        if (!PanelIsShown()) ShowPanel(true);
+        if (g_editMode || g_panelAdjusting) SetEditing(false, false);
+        else SetEditing(!IsDesktopMode(), IsDesktopMode());
         break;
-    case 700: g_settings.preset = "auto"; g_settings.desktopScale = 0; ApplyPlacement(false); cfg::Save(g_settings); break;
-    case 701: g_settings.preset = "1080p"; ApplyPlacement(false); cfg::Save(g_settings); break;
-    case 702: g_settings.preset = "2k"; ApplyPlacement(false); cfg::Save(g_settings); break;
-    case 703: g_settings.preset = "4k"; ApplyPlacement(false); cfg::Save(g_settings); break;
+    case 110: if (card) ShowDetail(*card, {x, y}); break;
+    case 111: if (card) ToggleCardShape(*card); break;
+    case 112: g_settings.freePlacement = !g_settings.freePlacement; cfg::Save(g_settings); break;
+    case 113: AutoArrangeCards(true); break;
+    case 114: AutoArrangeCards(false); break;
+    case 700: case 701: case 702: case 703: {
+        const char* presets[] = {"auto", "1080p", "2k", "4k"};
+        g_settings.preset = presets[command - 700];
+        if (IsDesktopMode()) g_settings.desktopScale = 0;
+        else g_settings.normalWidthDip = g_settings.normalHeightDip = 0;
+        ApplyPlacement(true);
+        cfg::Save(g_settings);
+        break;
+    }
     case 704: StepScale(-0.05); break;
     case 705: StepScale(0.05); break;
     case 800: ShowCardManager(g_hwnd); break;
@@ -1049,20 +1228,12 @@ static void ShowContextMenu(int x, int y) {
     case 402: SetLayerMode("bottom", true); break;
     case 500: g_settings.insightsRail = !g_settings.insightsRail; cfg::Save(g_settings); break;
     case 600: ShowPanel(false); break;
+    case 602: ShowPanel(!PanelIsShown()); break;
     case 601: g_exitRequested = true; PostMessageW(g_hwnd, WM_CLOSE, 0, 0); break;
     default: break;
     }
     g_material = theme::GetMaterial(g_settings.material);
     InvalidateRect(g_hwnd, nullptr, FALSE);
-}
-
-// Hit-testing for header buttons; rectangles are computed in Render().
-static void LayoutButtons(D2D1_SIZE_F size) {
-    const int buttonWidth = 96, buttonHeight = 34, gap = 8;
-    int right = (int)size.width - 24;
-    g_hideRect = RECT{ right - buttonWidth, 24, right, 24 + buttonHeight };
-    right -= buttonWidth + gap;
-    g_themeRect = RECT{ right - buttonWidth, 24, right, 24 + buttonHeight };
 }
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -1083,22 +1254,37 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         return HTCLIENT;
     }
 
+    case WM_EXITSIZEMOVE: {
+        RECT bounds{};
+        GetWindowRect(hwnd, &bounds);
+        g_settings.normalX = g_settings.desktopX = bounds.left;
+        g_settings.normalY = g_settings.desktopY = bounds.top;
+        cfg::Save(g_settings);
+        return 0;
+    }
+
     case WM_NCLBUTTONDBLCLK:
         return 0;   // never maximise this borderless panel
 
     case WM_SIZE:
+        if (wParam == SIZE_MINIMIZED) return 0;
+        if (LOWORD(lParam) > 0) g_scale = LOWORD(lParam) / kLogicalWidth;
         if (g_target) { g_target->Resize(D2D1::SizeU(LOWORD(lParam), HIWORD(lParam))); }
-        g_regionDirty = true;
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
 
     case WM_LBUTTONDOWN: {
+        CloseDetail();
         int x = GET_X_LPARAM(lParam), y = GET_Y_LPARAM(lParam);
         RECT window{}; GetWindowRect(hwnd, &window);
-        int width = window.right - window.left, height = window.bottom - window.top;
-        // Resize grip (bottom-right 24px), same affordance as the WPF build.
-        if (!IsDesktopMode() && x >= width - 32 && y >= height - 32) {
-            SendMessageW(hwnd, WM_SYSCOMMAND, SC_SIZE | 8, 0);   // SC_SIZE + bottom-right
+        const auto grip = ResizeGripBounds();
+        if (x >= grip.left * g_scale && x < grip.right * g_scale &&
+            y >= grip.top * g_scale && y < grip.bottom * g_scale) {
+            g_resizing = true;
+            g_resizeChanged = false;
+            g_dragOrigin = POINT{x + window.left, y + window.top};
+            g_dragWindow = window;
+            SetCapture(hwnd);
             return 0;
         }
         // Toolbar buttons use the same logical coordinates as DrawEditToolbar.
@@ -1106,20 +1292,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             const float scale = g_scale > 0 ? g_scale : 1.0f;
             POINT logical{ (LONG)(x / scale), (LONG)(y / scale) };
             if (PtInRect(&g_doneRect, logical)) {
-                g_editMode = false; g_panelAdjusting = false;
+                SetEditing(false, false);
                 cfg::Save(g_settings);
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
             if (PtInRect(&g_scaleDownRect, logical)) { StepScale(-0.05); return 0; }
             if (PtInRect(&g_scaleUpRect, logical)) { StepScale(0.05); return 0; }
-            if (PtInRect(&g_modeRect, logical)) {
-                if (g_editMode) { g_editMode = false; g_panelAdjusting = true; }
-                else { g_panelAdjusting = false; g_editMode = true; }
-                InvalidateRect(hwnd, nullptr, FALSE);
+            if (IsDesktopMode() && PtInRect(&g_modeRect, logical)) {
+                SetEditing(!g_editMode, g_editMode);
                 return 0;
             }
-            if (PtInRect(&g_layerRect, logical)) {
+            if (IsDesktopMode() && PtInRect(&g_layerRect, logical)) {
                 SetLayerMode(g_settings.layerMode == "top" ? "normal" : (g_settings.layerMode == "normal" ? "bottom" : "top"), true);
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
@@ -1128,7 +1312,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         // Header buttons.
         const float headerScale = g_scale > 0 ? g_scale : 1.0f;
         POINT client{ (LONG)(x / headerScale), (LONG)(y / headerScale) };
-        if (!IsDesktopMode()) {
+        if (ShowsChrome()) {
             if (PtInRect(&g_hideRect, client)) { ShowPanel(false); return 0; }
             if (PtInRect(&g_themeRect, client)) {
                 auto order = theme::Order();
@@ -1151,6 +1335,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         // Card click → detail. Hit test in the same logical space Render() uses.
         const float hitScale = g_scale > 0 ? g_scale : 1.0f;
         const float logicalX = x / hitScale, logicalY = y / hitScale;
+        if (logicalY >= ContentViewTop() && logicalY < ContentViewTop() + ContentViewHeight())
         for (size_t i = 0; i < g_placements.size(); ++i) {
             const auto& placement = g_placements[i];
             float left = placement.x;
@@ -1159,11 +1344,22 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             float cardHeight = placement.h;
             if (logicalX >= left && logicalX <= left + cardWidth && logicalY >= top && logicalY <= top + cardHeight) {
                 if (g_editMode) {
-                    g_dragCard = int(i);
-                    g_dragCardOffset = POINT{ x - (int)left, y - (int)top };
+                    const float right = left + cardWidth;
+                    if (logicalX >= right - 46 && logicalX <= right - 10 &&
+                        logicalY >= top + 8 && logicalY <= top + 36) {
+                        ToggleCardShape(*placement.card);
+                        return 0;
+                    }
+                    g_dragCard = placement.card->key;
+                    g_dragStart = POINT{x, y};
+                    g_dragCardOffset = POINT{LONG(x - left * hitScale), LONG(y - top * hitScale)};
+                    g_dragTarget = cfg::Slot{placement.row, placement.column};
+                    g_cardMoved = false;
                     SetCapture(hwnd);
                 } else {
-                    ShowDetail(int(i));
+                    POINT anchor{x, y};
+                    ClientToScreen(hwnd, &anchor);
+                    ShowDetail(*placement.card, anchor);
                 }
                 return 0;
             }
@@ -1180,15 +1376,38 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
 
     case WM_MOUSEMOVE: {
-        if (g_dragCard >= 0 && g_placements.size() > size_t(g_dragCard)) {
-            const auto& placement = g_placements[size_t(g_dragCard)];
-            D2D1_SIZE_F size = g_target->GetSize();
-            const float cellWidth = size.width / 4.0f;
-            const float cellHeight = cellWidth * 200.0f / 376.0f;
-            int column = std::max(0, std::min(3, int((GET_X_LPARAM(lParam) - g_dragCardOffset.x) / cellWidth)));
-            int row = std::max(0, int((GET_Y_LPARAM(lParam) - g_dragCardOffset.y - (IsDesktopMode() ? 0 : 96)) / cellHeight));
-            // Move the dragged card to the front of its slot group (visual only until release).
-            g_settings.cardSlots[placement.card->key] = cfg::Slot{ row, column };
+        if (g_resizing) {
+            POINT cursor{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            ClientToScreen(hwnd, &cursor);
+            const RECT work = WorkAreaAt({g_dragWindow.left, g_dragWindow.top});
+            const int initialWidth = g_dragWindow.right - g_dragWindow.left;
+            const int initialHeight = g_dragWindow.bottom - g_dragWindow.top;
+            const int maxWidth = std::max(1L, work.right - g_dragWindow.left);
+            const int maxHeight = std::max(1L, work.bottom - g_dragWindow.top);
+            int width = std::clamp(initialWidth + int(cursor.x - g_dragOrigin.x), std::min(480, maxWidth), maxWidth);
+            int height = std::clamp(initialHeight + int(cursor.y - g_dragOrigin.y), std::min(300, maxHeight), maxHeight);
+            if (IsDesktopMode()) {
+                const double w = initialWidth, h = initialHeight;
+                const double projected = 1.0 + ((cursor.x - g_dragOrigin.x) * w + (cursor.y - g_dragOrigin.y) * h) / (w * w + h * h);
+                const double maximum = std::min(maxWidth / w, maxHeight / h);
+                const double ratio = std::clamp(projected, std::min(maximum, std::max(480.0 / w, 300.0 / h)), maximum);
+                width = std::max(1, int(initialWidth * ratio));
+                height = std::max(1, int(initialHeight * ratio));
+            }
+            if (SetWindowPos(hwnd, nullptr, 0, 0, width, height, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE))
+                g_resizeChanged = width != initialWidth || height != initialHeight;
+            return 0;
+        }
+        if (!g_dragCard.empty()) {
+            const int x = GET_X_LPARAM(lParam), y = GET_Y_LPARAM(lParam);
+            if (!g_cardMoved && std::abs(x - g_dragStart.x) < GetSystemMetrics(SM_CXDRAG) &&
+                std::abs(y - g_dragStart.y) < GetSystemMetrics(SM_CYDRAG)) return 0;
+            g_cardMoved = true;
+            const int span = CardSpan(g_dragCard);
+            const float left = (x - g_dragCardOffset.x) / g_scale - kContentLeft;
+            const float top = (y - g_dragCardOffset.y) / g_scale - ContentViewTop() + g_scrollOffset;
+            g_dragTarget = {std::clamp(int(std::lround(top / kCellHeight)), 0, layout::kRows - 1),
+                            std::clamp(int(std::lround(left / kCardWidth)), 0, layout::kColumns - span)};
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
@@ -1205,11 +1424,38 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
 
     case WM_LBUTTONUP: {
-        if (g_dragCard >= 0) {
-            // Commit: persist slot order, then re-pack from slots.
-            g_settings.customLayout = true;
-            cfg::Save(g_settings);
-            g_dragCard = -1;
+        if (g_resizing) {
+            g_resizing = false;
+            if (g_resizeChanged) {
+                RECT bounds{};
+                GetClientRect(hwnd, &bounds);
+                const double dip = 96.0 / GetDpiForWindow(hwnd);
+                if (IsDesktopMode()) g_settings.desktopScale = bounds.right * dip / kLogicalWidth;
+                else {
+                    g_settings.normalWidthDip = bounds.right * dip;
+                    g_settings.normalHeightDip = bounds.bottom * dip;
+                }
+                cfg::Save(g_settings);
+            }
+            ReleaseCapture();
+            return 0;
+        }
+        if (!g_dragCard.empty()) {
+            if (g_cardMoved) {
+                const auto cards = ActiveCards();
+                auto slots = layout::Pack(cards, g_settings.cardSlots);
+                const auto start = slots.find(g_dragCard);
+                const bool changed = start == slots.end() || start->second.row != g_dragTarget.row ||
+                    start->second.column != g_dragTarget.column;
+                if (changed && layout::Move(slots, cards, {g_dragCard, CardSpan(g_dragCard)}, g_dragTarget,
+                                            g_settings.freePlacement)) {
+                    g_settings.cardSlots = std::move(slots);
+                    g_settings.customLayout = true;
+                    cfg::Save(g_settings);
+                }
+            }
+            g_dragCard.clear();
+            g_cardMoved = false;
             ReleaseCapture();
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
@@ -1226,15 +1472,38 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         return 0;
     }
 
+    case WM_CAPTURECHANGED:
+        if (g_resizing) {
+            g_resizing = false;
+            SetWindowPos(hwnd, nullptr, 0, 0, g_dragWindow.right - g_dragWindow.left,
+                         g_dragWindow.bottom - g_dragWindow.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        g_dragCard.clear();
+        g_cardMoved = false;
+        g_dragging = false;
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+
     case WM_RBUTTONUP: {
         POINT point{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        const float x = point.x / g_scale, y = point.y / g_scale;
+        const CardDef* card = nullptr;
+        if (y >= ContentViewTop() && y < ContentViewTop() + ContentViewHeight()) {
+            for (const auto& p : g_placements) {
+                const float top = p.y - g_scrollOffset;
+                if (x >= p.x && x < p.x + p.w && y >= top && y < top + p.h) {
+                    card = p.card;
+                    break;
+                }
+            }
+        }
         ClientToScreen(hwnd, &point);
-        ShowContextMenu(point.x, point.y);
+        ShowContextMenu(point.x, point.y, false, card);
         return 0;
     }
 
     case WM_KEYDOWN:
-        if (wParam == VK_ESCAPE) { g_editMode = false; g_panelAdjusting = false; InvalidateRect(hwnd, nullptr, FALSE); }
+        if (wParam == VK_ESCAPE) { CloseDetail(); SetEditing(false, false); }
         return 0;
 
     case WM_TIMER:
@@ -1243,26 +1512,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_APP + 1:   // tray callback
         if (LOWORD(lParam) == WM_LBUTTONDBLCLK) {
-            ShowPanel(!IsWindowVisible(hwnd));
+            ShowPanel(!PanelIsShown());
         } else if (LOWORD(lParam) == WM_RBUTTONUP) {
             POINT point{}; GetCursorPos(&point);
-            HMENU menu = CreatePopupMenu();
-            AppendMenuW(menu, MF_STRING, 1, T(L"显示 / 隐藏", L"顯示 / 隱藏", L"Show / hide").c_str());
-            AppendMenuW(menu, MF_STRING, 2, T(L"退出", L"結束", L"Quit").c_str());
-            int command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y, 0, hwnd, nullptr);
-            DestroyMenu(menu);
-            if (command == 1) ShowPanel(!IsWindowVisible(hwnd));
-            if (command == 2) PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            ShowContextMenu(point.x, point.y, true);
         }
         return 0;
 
     case WM_MOUSEWHEEL: {
-        if (IsDesktopMode()) return 0;
-        BuildPlacements(4);
-        int lastRow = 0;
-        for (const auto& placement : g_placements) lastRow = std::max(lastRow, placement.row);
-        const float contentHeight = (lastRow + 1) * kCellHeight + 16.0f;
-        const float maxScroll = std::max(0.0f, contentHeight - ContentViewHeight());
+        BuildPlacements();
+        const float maxScroll = MaximumScroll();
         g_scrollOffset -= GET_WHEEL_DELTA_WPARAM(wParam) / 120.0f * 90.0f;
         g_scrollOffset = std::max(0.0f, std::min(maxScroll, g_scrollOffset));
         InvalidateRect(hwnd, nullptr, FALSE);
@@ -1292,7 +1551,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)),
                 D2D1::HwndRenderTargetProperties(hwnd, D2D1::SizeU(client.right, client.bottom)),
                 &g_target);
-            if (g_target) g_target->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
+            if (g_target) {
+                g_target->SetDpi(96.0f, 96.0f);
+                g_target->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
+            }
         }
         Render();
         if (IsDesktopMode()) ApplyRegion();
@@ -1326,7 +1588,6 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int) {
     g_language = g_settings.language.empty() ? "zh-CN" : g_settings.language;
     g_material = theme::GetMaterial(g_settings.material);
     g_palettes = theme::BuildAll();
-    g_showRail = g_settings.insightsRail;
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -1336,13 +1597,14 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int) {
     wc.lpszClassName = L"SysMonGlassNative";
     wc.hbrBackground = nullptr;
     wc.hIcon = LoadIconW(instance, L"APPICON");
+    if (!wc.hIcon) wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
     wc.hIconSm = wc.hIcon;
     RegisterClassExW(&wc);
 
     RECT work{};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
     POINT start{ (work.right - work.left - 1200) / 2, (work.bottom - work.top - 700) / 2 };
-    g_hwnd = CreateWindowExW(WS_EX_TOOLWINDOW, wc.lpszClassName, L"系统状态 · Glass", WS_POPUP,
+    g_hwnd = CreateWindowExW(WS_EX_APPWINDOW, wc.lpszClassName, L"系统状态 · Glass", WS_POPUP | WS_MINIMIZEBOX,
                              start.x, start.y, 1200, 700, nullptr, nullptr, instance, nullptr);
     if (!g_hwnd) return 1;
 
@@ -1364,7 +1626,6 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int) {
         if (host.id == g_settings.activeHostId) { g_collector.StartRemote(host); break; }
     }
     UpdateMetrics();
-    ApplyPlacement(false);
     SetLayerMode(g_settings.layerMode, false);
     g_timerId = SetTimer(g_hwnd, 1, UINT(g_settings.interval), nullptr);
     ToggleTray(true);
@@ -1379,7 +1640,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int) {
     if (g_timerId) KillTimer(g_hwnd, g_timerId);
     g_collector.StopRemote();
     if (g_target) g_target->Release();
-    for (IDWriteTextFormat* format : { g_fmtTitle, g_fmtValue, g_fmtUnit, g_fmtSmall, g_fmtStats, g_fmtDetail, g_fmtHeader, g_fmtEyebrow, g_fmtButton })
+    for (IDWriteTextFormat* format : { g_fmtTitle, g_fmtValue, g_fmtUnit, g_fmtSmall, g_fmtStats, g_fmtStatLabel, g_fmtDetail, g_fmtCardSub, g_fmtHeader, g_fmtEyebrow, g_fmtButton, g_fmtIcon })
         if (format) format->Release();
     if (g_dwrite) g_dwrite->Release();
     if (g_d2d) g_d2d->Release();

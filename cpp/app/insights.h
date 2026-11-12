@@ -26,10 +26,10 @@ static void UpdateInsightsAlerts() {
 }
 
 static void DrawInsightsRail(ID2D1RenderTarget* target, const theme::Palette& palette) {
-    if (!IsDesktopMode() || !g_settings.insightsRail) return;
-    const float left = 1192.0f, top = 12.0f, width = 300.0f;
-    const float bottom = ContentViewHeight() - 12.0f;
-    const D2D1_RECT_F panel = D2D1::RectF(left, top, left + width, bottom);
+    const D2D1_RECT_F panel = InsightsBounds();
+    if (panel.right <= panel.left) return;
+    const float left = panel.left, top = panel.top, width = panel.right - panel.left;
+    const float bottom = panel.bottom;
     ID2D1SolidColorBrush* face = nullptr;
     ID2D1SolidColorBrush* rim = nullptr;
     ID2D1SolidColorBrush* text = nullptr;
@@ -52,7 +52,7 @@ static void DrawInsightsRail(ID2D1RenderTarget* target, const theme::Palette& pa
     };
     auto value = [&](const char* key) -> std::wstring {
         auto it = g_snapshot.values.find(key);
-        return it == g_snapshot.values.end() ? L"—" : FormatNumber(it->second, false);
+        return it == g_snapshot.values.end() ? L"—" : FormatNumber(it->second);
     };
 
     float y = top + 16;
@@ -73,8 +73,8 @@ static void DrawInsightsRail(ID2D1RenderTarget* target, const theme::Palette& pa
             double high = history->second[0], low = history->second[0], sum = 0;
             for (double sample : history->second) { high = std::max(high, sample); low = std::min(low, sample); sum += sample; }
             const double mean = sum / history->second.size();
-            line(y, T(L"当前 ", L"目前 ", L"Current ") + FormatNumber(history->second.back(), false) + L"   " + T(L"均值 ", L"均值 ", L"Mean ") + FormatNumber(mean, false)); y += 25;
-            line(y, T(L"最小 ", L"最小 ", L"Min ") + FormatNumber(low, false) + L"   " + T(L"最大 ", L"最大 ", L"Max ") + FormatNumber(high, false)); y += 25;
+            line(y, T(L"当前 ", L"目前 ", L"Current ") + FormatCardSample(*tracked, history->second.back()) + L"   " + T(L"均值 ", L"均值 ", L"Mean ") + FormatCardSample(*tracked, mean)); y += 25;
+            line(y, T(L"最小 ", L"最小 ", L"Min ") + FormatCardSample(*tracked, low) + L"   " + T(L"最大 ", L"最大 ", L"Max ") + FormatCardSample(*tracked, high)); y += 25;
             wchar_t samples[64];
             std::swprintf(samples, 64, T(L"样本 %zu 条", L"樣本 %zu 條", L"%zu samples").c_str(), history->second.size());
             line(y, samples); y += 28;
@@ -85,14 +85,14 @@ static void DrawInsightsRail(ID2D1RenderTarget* target, const theme::Palette& pa
     line(y, L"CPU", local ? local : secondary); y += 22;
     for (const auto& process : g_snapshot.topCpu) {
         wchar_t row[96];
-        std::swprintf(row, 96, L"%-18s %5.1f%%", process.name.substr(0, 18).c_str(), process.cpu);
+        std::swprintf(row, 96, L"%-18ls %5.1f%%", process.name.substr(0, 18).c_str(), process.cpu);
         line(y, row); y += 21;
     }
     y += 8;
     line(y, T(L"内存", L"記憶體", L"Memory"), local ? local : secondary); y += 22;
     for (const auto& process : g_snapshot.topMem) {
         wchar_t row[96];
-        std::swprintf(row, 96, L"%-18s %5.0f M", process.name.substr(0, 18).c_str(), process.memMiB);
+        std::swprintf(row, 96, L"%-18ls %5.0f MB", process.name.substr(0, 18).c_str(), process.memMiB * (1048576.0 / 1000000.0));
         line(y, row); y += 21;
     }
 
@@ -103,9 +103,11 @@ static void DrawInsightsRail(ID2D1RenderTarget* target, const theme::Palette& pa
     } else {
         for (const auto& alert : g_alerts) {
             const CardDef* card = FindCard(alert.key);
-            wchar_t row[128];
-            std::swprintf(row, 128, L"%s %02d:%02d %s %.0f", alert.level == 2 ? L"▲" : L"●",
-                          alert.at.wHour, alert.at.wMinute, card ? Tr(*card).c_str() : metrics::Utf8ToWide(alert.key).c_str(), alert.value);
+            wchar_t prefix[32];
+            std::swprintf(prefix, std::size(prefix), L"%ls %02d:%02d ", alert.level == 2 ? L"▲" : L"●",
+                          alert.at.wHour, alert.at.wMinute);
+            const std::wstring reading = card ? FormatCardSample(*card, alert.value) : FormatNumber(alert.value);
+            const std::wstring row = prefix + (card ? Tr(*card) : metrics::Utf8ToWide(alert.key)) + L" " + reading;
             ID2D1SolidColorBrush* alertBrush = nullptr;
             target->CreateSolidColorBrush(ToColorF(alert.level == 2 ? palette.bad : palette.warn), &alertBrush);
             line(y, row, alertBrush ? alertBrush : secondary);

@@ -143,7 +143,7 @@ static bool ShowCardManager(HWND owner) {
     SetForegroundWindow(owner);
     if (state.accepted) {
         cfg::Save(g_settings);
-        BuildPlacements(4);
+        BuildPlacements();
         InvalidateRect(owner, nullptr, FALSE);
     }
     return state.accepted;

@@ -9,6 +9,7 @@
 #include <map>
 #include <algorithm>
 #include <cstdio>
+#include <cmath>
 
 namespace cfg {
 
@@ -38,7 +39,7 @@ struct Settings {
     bool freePlacement = false;
     // placement (shared across modes; only size is per-mode)
     double normalX = -1e9, normalY = -1e9, desktopX = -1e9, desktopY = -1e9;
-    double desktopScale = 1.0;
+    double desktopScale = 0.0;
     double normalWidthDip = 0, normalHeightDip = 0;
     // cards
     std::vector<std::string> cardOrder;
@@ -87,25 +88,27 @@ inline Settings Defaults() {
     return s;
 }
 
-inline Settings Load() {
-    Settings s = Defaults();
-    std::string path = ConfigPath();
+inline js::Value ReadRoot(const std::string& path) {
     FILE* file = std::fopen(path.c_str(), "rb");
-    if (!file) return s;
+    if (!file) return {};
     std::string text;
     char buffer[4096];
     while (size_t read = std::fread(buffer, 1, sizeof(buffer), file)) text.append(buffer, read);
     std::fclose(file);
-    if (text.empty()) return s;
+    return js::Parse(text);
+}
 
-    js::Value root = js::Parse(text);
+inline Settings Load() {
+    Settings s = Defaults();
+    const auto root = ReadRoot(ConfigPath());
     if (!root.IsObject()) return s;
 
     s.theme = root.Str("theme", s.theme);
     s.material = root.Str("material", s.material);
     s.language = root.Str("language", s.language);
     s.interval = (int)root.Num("interval", s.interval);
-    s.layerMode = root.Str("layerMode", s.layerMode);
+    s.layerMode = root.Str("layerMode", root.Bool("desktopMode", false) ? "bottom" :
+        (root.Bool("alwaysOnTop", false) ? "top" : s.layerMode));
     s.preset = root.Str("preset", s.preset);
     s.insightsRail = root.Bool("insightsRail", s.insightsRail);
     s.customLayout = root.Bool("customLayout", s.customLayout);
@@ -126,8 +129,11 @@ inline Settings Load() {
         for (const auto& [key, value] : *slots->fields) {
             if (!value.IsObject()) continue;
             Slot slot;
-            slot.row = (int)value.Num("row", 0);
-            slot.column = (int)value.Num("column", 0);
+            const double row = value.Num("row", -1), column = value.Num("column", -1);
+            if (row < 0 || row > 11 || column < 0 || column > 3 ||
+                row != std::floor(row) || column != std::floor(column)) continue;
+            slot.row = int(row);
+            slot.column = int(column);
             s.cardSlots[key] = slot;
         }
     }
@@ -162,18 +168,21 @@ inline Settings Load() {
     if (s.interval != 1000 && s.interval != 2000 && s.interval != 3000 && s.interval != 5000) s.interval = 2000;
     if (s.layerMode != "top" && s.layerMode != "normal" && s.layerMode != "bottom") s.layerMode = "normal";
     if (s.preset != "auto" && s.preset != "1080p" && s.preset != "2k" && s.preset != "4k") s.preset = "2k";
-    if (s.desktopScale < 0.2) s.desktopScale = 1.0;
+    if (s.desktopScale < 0.1 || s.desktopScale > 10.0) s.desktopScale = 0;
     if (s.cardOrder.empty()) s.cardOrder = DefaultCardOrder();
     return s;
 }
 
 inline bool Save(const Settings& s) {
-    js::Value root = js::Value::MakeObject();
+    const std::string path = ConfigPath();
+    js::Value root = ReadRoot(path);
+    if (!root.IsObject()) root = js::Value::MakeObject();
     root.Set("theme", js::Value::MakeString(s.theme));
     root.Set("material", js::Value::MakeString(s.material));
     root.Set("language", js::Value::MakeString(s.language));
     root.Set("interval", js::Value::MakeNumber(s.interval));
     root.Set("layerMode", js::Value::MakeString(s.layerMode));
+    root.Set("alwaysOnTop", js::Value::MakeBool(s.layerMode == "top"));
     // desktopMode mirrors layerMode so older builds read the same state.
     root.Set("desktopMode", js::Value::MakeBool(s.layerMode == "bottom"));
     root.Set("preset", js::Value::MakeString(s.preset));
@@ -183,7 +192,8 @@ inline bool Save(const Settings& s) {
     if (s.normalX > -1e8) { root.Set("normalX", js::Value::MakeNumber(s.normalX)); root.Set("normalY", js::Value::MakeNumber(s.normalY)); }
     if (s.desktopX > -1e8) { root.Set("desktopX", js::Value::MakeNumber(s.desktopX)); root.Set("desktopY", js::Value::MakeNumber(s.desktopY)); }
     root.Set("desktopScale", js::Value::MakeNumber(s.desktopScale));
-    if (s.normalWidthDip > 0) { root.Set("normalWidthDip", js::Value::MakeNumber(s.normalWidthDip)); root.Set("normalHeightDip", js::Value::MakeNumber(s.normalHeightDip)); }
+    root.Set("normalWidthDip", js::Value::MakeNumber(s.normalWidthDip));
+    root.Set("normalHeightDip", js::Value::MakeNumber(s.normalHeightDip));
 
     js::Value order = js::Value::MakeArray();
     for (const auto& key : s.cardOrder) order.items->push_back(js::Value::MakeString(key));
@@ -206,7 +216,7 @@ inline bool Save(const Settings& s) {
         js::Value enabled = js::Value::MakeArray();
         for (const auto& key : s.enabledCards) enabled.items->push_back(js::Value::MakeString(key));
         root.Set("enabledCards", enabled);
-    }
+    } else root.fields->erase("enabledCards");
 
     js::Value hosts = js::Value::MakeArray();
     for (const auto& host : s.hosts) {
@@ -223,15 +233,16 @@ inline bool Save(const Settings& s) {
     root.Set("hosts", hosts);
     root.Set("activeHostId", js::Value::MakeString(s.activeHostId));
 
-    std::string path = ConfigPath();
     EnsureParent(path);
-    std::string temp = path + ".tmp";
+    const std::string temp = path + "." + std::to_string(GetCurrentProcessId()) + ".tmp";
     FILE* file = std::fopen(temp.c_str(), "wb");
     if (!file) return false;
     std::string text = js::Serialize(root, true);
-    std::fwrite(text.data(), 1, text.size(), file);
-    std::fclose(file);
-    return MoveFileExA(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+    const bool written = std::fwrite(text.data(), 1, text.size(), file) == text.size();
+    const bool closed = std::fclose(file) == 0;
+    if (written && closed && MoveFileExA(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) return true;
+    DeleteFileA(temp.c_str());
+    return false;
 }
 
 } // namespace cfg
