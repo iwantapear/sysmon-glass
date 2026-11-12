@@ -52,7 +52,7 @@ static void DrawInsightsRail(ID2D1RenderTarget* target, const theme::Palette& pa
     };
     auto value = [&](const char* key) -> std::wstring {
         auto it = g_snapshot.values.find(key);
-        return it == g_snapshot.values.end() ? L"—" : FormatNumber(it->second, false);
+        return it == g_snapshot.values.end() ? L"—" : FormatNumber(it->second);
     };
 
     float y = top + 16;
@@ -85,14 +85,14 @@ static void DrawInsightsRail(ID2D1RenderTarget* target, const theme::Palette& pa
     line(y, L"CPU", local ? local : secondary); y += 22;
     for (const auto& process : g_snapshot.topCpu) {
         wchar_t row[96];
-        std::swprintf(row, 96, L"%-18s %5.1f%%", process.name.substr(0, 18).c_str(), process.cpu);
+        std::swprintf(row, 96, L"%-18ls %5.1f%%", process.name.substr(0, 18).c_str(), process.cpu);
         line(y, row); y += 21;
     }
     y += 8;
     line(y, T(L"内存", L"記憶體", L"Memory"), local ? local : secondary); y += 22;
     for (const auto& process : g_snapshot.topMem) {
         wchar_t row[96];
-        std::swprintf(row, 96, L"%-18s %5.0f M", process.name.substr(0, 18).c_str(), process.memMiB);
+        std::swprintf(row, 96, L"%-18ls %5.0f MB", process.name.substr(0, 18).c_str(), process.memMiB * (1048576.0 / 1000000.0));
         line(y, row); y += 21;
     }
 
@@ -103,9 +103,11 @@ static void DrawInsightsRail(ID2D1RenderTarget* target, const theme::Palette& pa
     } else {
         for (const auto& alert : g_alerts) {
             const CardDef* card = FindCard(alert.key);
-            wchar_t row[128];
-            std::swprintf(row, 128, L"%s %02d:%02d %s %.0f", alert.level == 2 ? L"▲" : L"●",
-                          alert.at.wHour, alert.at.wMinute, card ? Tr(*card).c_str() : metrics::Utf8ToWide(alert.key).c_str(), alert.value);
+            wchar_t prefix[32];
+            std::swprintf(prefix, std::size(prefix), L"%ls %02d:%02d ", alert.level == 2 ? L"▲" : L"●",
+                          alert.at.wHour, alert.at.wMinute);
+            const std::wstring reading = card ? FormatCardSample(*card, alert.value) : FormatNumber(alert.value);
+            const std::wstring row = prefix + (card ? Tr(*card) : metrics::Utf8ToWide(alert.key)) + L" " + reading;
             ID2D1SolidColorBrush* alertBrush = nullptr;
             target->CreateSolidColorBrush(ToColorF(alert.level == 2 ? palette.bad : palette.warn), &alertBrush);
             line(y, row, alertBrush ? alertBrush : secondary);

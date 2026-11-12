@@ -340,11 +340,10 @@ static float MeasureTextWidth(const std::wstring& text, IDWriteTextFormat* forma
     return metrics.width;
 }
 
-static std::wstring FormatNumber(double value, bool temperature) {
+static std::wstring FormatNumber(double value) {
     wchar_t buffer[64];
     if (std::fabs(value) < 10) std::swprintf(buffer, 64, L"%.1f", value);
     else std::swprintf(buffer, 64, L"%.0f", value);
-    (void)temperature;
     return buffer;
 }
 
@@ -378,17 +377,19 @@ static CardReading FormatNetworkRate(double kibPerSecond) {
     return {value, units[unit]};
 }
 
+static CardReading FormatCardReading(const CardDef& card, double value) {
+    if (IsNetworkCard(card)) return FormatNetworkRate(value);
+    return {FormatNumber(value), metrics::Utf8ToWide(card.unit)};
+}
+
 static CardReading ReadCard(const CardDef& card) {
     const auto it = g_snapshot.values.find(card.key);
-    if (IsNetworkCard(card))
-        return it == g_snapshot.values.end() ? CardReading{L"—", L""} : FormatNetworkRate(it->second);
-
-    return {it == g_snapshot.values.end() ? L"—" : FormatNumber(it->second, card.temperature),
-            metrics::Utf8ToWide(card.unit)};
+    if (it != g_snapshot.values.end()) return FormatCardReading(card, it->second);
+    return {L"—", metrics::Utf8ToWide(card.unit)};
 }
 
 static std::wstring FormatCardSample(const CardDef& card, double sample) {
-    return IsNetworkCard(card) ? FormatNetworkRate(sample).Text() : FormatNumber(sample, false);
+    return FormatCardReading(card, sample).Text();
 }
 
 static void DrawReading(ID2D1RenderTarget* target, const CardReading& reading,
@@ -416,7 +417,7 @@ static std::wstring CardDetail(const CardDef& card) {
     auto value = [&](const char* name) -> std::wstring {
         auto it = g_snapshot.values.find(name);
         if (it == g_snapshot.values.end()) return L"—";
-        return FormatNumber(it->second, false);
+        return FormatNumber(it->second);
     };
     if (key == "cpu") return T(L"功耗 ", L"功耗 ", L"Power ") + value("cpuPwr") + L" W";
     if (key == "gpuT") return T(L"功耗 ", L"功耗 ", L"Power ") + value("gpuPwr") + L" W · " + T(L"使用率 ", L"使用率 ", L"usage ") + value("gpuUtil") + L"%";
